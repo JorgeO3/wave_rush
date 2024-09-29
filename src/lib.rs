@@ -6,13 +6,10 @@ use std::{
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// Represents a static error message.
     #[error("{0}")]
     Static(&'static str),
-    /// Represents a generic error with a dynamic message.
-    #[error("Generic {0}")]
+    #[error("Error genérico: {0}")]
     Generic(String),
-    /// Represents an IO error, wrapped from std::io::Error.
     #[error(transparent)]
     Io(#[from] io::Error),
 }
@@ -56,90 +53,8 @@ pub struct CodecParams {
     pub extra_data: Option<Box<[u8]>>,
 }
 
-impl CodecParams {
-    /// Creates a new `CodecParams` with default values.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn set_codec(&mut self, codec: u32) -> &mut Self {
-        self.codec = Some(codec);
-        self
-    }
-
-    pub fn set_sample_rate(&mut self, sample_rate: u32) -> &mut Self {
-        self.sample_rate = Some(sample_rate);
-        self
-    }
-
-    pub fn set_time_base(&mut self, numer: u32, denom: u32) -> &mut Self {
-        self.time_base = Some(TimeBase { numer, denom });
-        self
-    }
-
-    pub fn set_num_frames(&mut self, num_frames: u64) -> &mut Self {
-        self.num_frames = Some(num_frames);
-        self
-    }
-
-    pub fn set_start_ts(&mut self, start_ts: u64) -> &mut Self {
-        self.start_ts = start_ts;
-        self
-    }
-
-    pub fn set_sample_format(&mut self, sample_format: SampleFormat) -> &mut Self {
-        self.sample_format = Some(sample_format);
-        self
-    }
-
-    pub fn set_bits_per_sample(&mut self, bits_per_sample: u16) -> &mut Self {
-        self.bits_per_sample = Some(bits_per_sample);
-        self
-    }
-
-    pub fn set_bits_per_coded_sample(&mut self, bits_per_coded_sample: u32) -> &mut Self {
-        self.bits_per_coded_sample = Some(bits_per_coded_sample);
-        self
-    }
-
-    pub fn set_num_channels(&mut self, num_channels: u16) -> &mut Self {
-        self.num_channels = num_channels;
-        self
-    }
-
-    pub fn set_delay(&mut self, delay: u32) -> &mut Self {
-        self.delay = Some(delay);
-        self
-    }
-
-    pub fn set_padding(&mut self, padding: u32) -> &mut Self {
-        self.padding = Some(padding);
-        self
-    }
-
-    pub fn set_max_frames_per_packet(&mut self, max_frames_per_packet: u64) -> &mut Self {
-        self.max_frames_per_packet = Some(max_frames_per_packet);
-        self
-    }
-
-    pub fn set_packet_data_integrity(&mut self, packet_data_integrity: bool) -> &mut Self {
-        self.packet_data_integrity = packet_data_integrity;
-        self
-    }
-
-    pub fn set_frames_per_block(&mut self, frames_per_block: u64) -> &mut Self {
-        self.frames_per_block = Some(frames_per_block);
-        self
-    }
-
-    pub fn set_extra_data(&mut self, extra_data: Box<[u8]>) -> &mut Self {
-        self.extra_data = Some(extra_data);
-        self
-    }
-}
-
 /// Represents the "fmt " chunk in a WAV file.
-struct FormatChunk {
+pub struct FormatChunk {
     audio_format: u16,
     num_channels: u16,
     sample_rate: u32,
@@ -156,18 +71,19 @@ impl FormatChunk {
 }
 
 /// Represents the "LIST" chunk in a WAV file.
-struct ListChunk {
+pub struct ListChunk {
     list_type: [u8; 4],
     length: u32,
+    tags: Vec<Tag>,
 }
 
 /// Represents the "fact" chunk in a WAV file.
-struct FactChunk {
+pub struct FactChunk {
     num_samples: u32,
 }
 
 /// Represents the "data" chunk in a WAV file.
-struct DataChunk {
+pub struct DataChunk {
     length: u32,
     data_position: u64,
 }
@@ -192,22 +108,25 @@ pub enum ChunkType {
 impl ChunkType {
     /// Converts a 4-byte ID into a corresponding `ChunkType`.
     pub fn from_id(id: &[u8; 4]) -> Self {
-        use ChunkType::*;
         match id {
-            b"fmt " => Format,
-            b"LIST" => List,
-            b"fact" => Fact,
-            b"data" => Data,
-            _ => Unknown,
+            b"fmt " => ChunkType::Format,
+            b"LIST" => ChunkType::List,
+            b"fact" => ChunkType::Fact,
+            b"data" => ChunkType::Data,
+            _ => ChunkType::Unknown,
         }
     }
 }
 
-/// Enum representing byte order types.
-pub enum ByteOrder {
-    LittleEndian,
-    BigEndian,
+/// A `Tag` encapsulates a key-value pair of metadata.
+#[derive(Clone, Debug)]
+pub struct Tag {
+    pub tag_type: Option<TagType>,
+    pub key: String,
+    pub value: String,
 }
+
+/// Byte order types (not used in the refactored code, so removed).
 
 const BUFFER_SIZE: usize = 1024 * 16;
 
@@ -245,12 +164,6 @@ impl<R: Read + Seek + Debug> SourceStream<R> {
         Ok(u32::from_le_bytes(bytes))
     }
 
-    /// Reads a `u32` in big-endian format.
-    pub fn read_u32_be(&mut self) -> Result<u32> {
-        let bytes = self.read_exact::<4>()?;
-        Ok(u32::from_be_bytes(bytes))
-    }
-
     /// Seeks to a specific position in the stream.
     pub fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
         let new_pos = self.reader.seek(pos)?;
@@ -272,7 +185,7 @@ struct ChunkParser<'a, R: Read + Seek + Debug> {
 }
 
 impl<'a, R: Read + Seek + Debug> ChunkParser<'a, R> {
-    /// Creates a new chunk parser with the given source stream and byte order.
+    /// Creates a new chunk parser with the given source stream and length.
     pub fn new(source_stream: &'a mut SourceStream<R>, length: usize) -> Self {
         Self {
             source_stream,
@@ -284,77 +197,93 @@ impl<'a, R: Read + Seek + Debug> ChunkParser<'a, R> {
     /// Aligns the cursor to the next 2-byte boundary, if needed.
     fn align(&mut self) -> Result<()> {
         if self.cursor & 1 != 0 {
-            self.source_stream.seek(SeekFrom::Current(1))?;
-            self.cursor += 1;
+            self.skip_bytes(1)?;
         }
         Ok(())
     }
 
     /// Moves the cursor by the specified number of bytes.
-    fn move_cursor(&mut self, n: usize) -> Result<()> {
+    fn skip_bytes(&mut self, n: usize) -> Result<()> {
         self.source_stream.seek(SeekFrom::Current(n as i64))?;
         self.cursor += n;
         Ok(())
     }
 
+    fn read_u16_le(&mut self) -> Result<u16> {
+        let bytes = self.read_exact::<2>()?;
+        Ok(u16::from_le_bytes(bytes))
+    }
+
+    fn read_u32_le(&mut self) -> Result<u32> {
+        let bytes = self.read_exact::<4>()?;
+        Ok(u32::from_le_bytes(bytes))
+    }
+
+    fn read_exact<const N: usize>(&mut self) -> Result<[u8; N]> {
+        let mut result = [0u8; N];
+        self.source_stream.reader.read_exact(&mut result)?;
+        self.cursor += N;
+        Ok(result)
+    }
+
+    fn read_bytes(&mut self, n: usize) -> Result<Vec<u8>> {
+        let mut buffer = vec![0; n];
+        self.source_stream.reader.read_exact(&mut buffer)?;
+        self.cursor += n;
+        Ok(buffer)
+    }
+
     /// Iterates over each chunk and applies the given function to each.
-    pub fn for_each_chunk<F>(&mut self, mut f: F) -> Result<()>
+    pub fn parse_chunks<F>(&mut self, mut f: F) -> Result<()>
     where
         F: FnMut(WaveChunk) -> Result<()>,
     {
         while self.cursor + 8 <= self.length {
-            self.align()?;
-
             // Read the chunk ID and size.
-            let chunk_id = self.source_stream.read_exact::<4>()?;
-            let chunk_size = self.source_stream.read_u32_le()?;
+            let chunk_id = self.read_exact::<4>()?;
+            let chunk_size = self.read_u32_le()?;
             let chunk_size_usize = chunk_size as usize;
-            self.cursor += 8;
 
-            // Special case where the chunk size is `u32::MAX` and matches `self.length`.
-            let is_special_case = self.length == chunk_size_usize && chunk_size == u32::MAX;
-
-            // Check if the chunk_size exceeds the remaining bytes, excluding the special case.
-            if !is_special_case && self.length - self.cursor < chunk_size_usize {
+            // Check if the chunk_size exceeds the remaining bytes.
+            if self.length - self.cursor < chunk_size_usize {
                 return Err(Error::Static("Chunk size exceeds the remaining length"));
             }
 
-            self.cursor = self.cursor.saturating_add(chunk_size_usize);
-
             // Process the chunk based on its ID.
             let chunk = match ChunkType::from_id(&chunk_id) {
-                ChunkType::Format => self.parse_format_chunk(chunk_size)?,
-                ChunkType::Data => self.parse_data_chunk(chunk_size)?,
-                ChunkType::List => self.parse_list_chunk(chunk_size)?,
-                ChunkType::Fact => self.parse_fact_chunk(chunk_size)?,
+                ChunkType::Format => self.parse_format_chunk(chunk_size_usize)?,
+                ChunkType::Data => self.parse_data_chunk(chunk_size_usize)?,
+                ChunkType::List => self.parse_list_chunk(chunk_size_usize)?,
+                ChunkType::Fact => self.parse_fact_chunk(chunk_size_usize)?,
                 ChunkType::Unknown => {
-                    self.source_stream
-                        .seek(SeekFrom::Current(chunk_size as i64))?;
-                    self.cursor += chunk_size_usize;
+                    self.skip_bytes(chunk_size_usize)?;
                     continue;
                 }
             };
 
             f(chunk)?;
+            self.align()?;
         }
 
         Ok(())
     }
 
     /// Parses a "fmt " chunk.
-    fn parse_format_chunk(&mut self, chunk_size: u32) -> Result<WaveChunk> {
-        let audio_format = self.source_stream.read_u16_le()?;
-        let num_channels = self.source_stream.read_u16_le()?;
-        let sample_rate = self.source_stream.read_u32_le()?;
-        let byte_rate = self.source_stream.read_u32_le()?;
-        let block_align = self.source_stream.read_u16_le()?;
-        let bits_per_sample = self.source_stream.read_u16_le()?;
-        self.cursor += 16;
+    fn parse_format_chunk(&mut self, chunk_size: usize) -> Result<WaveChunk> {
+        if chunk_size < 16 {
+            return Err(Error::Static("Invalid format chunk size"));
+        }
 
-        if chunk_size > 16 {
-            let extra_size = (chunk_size - 16) as i64;
-            self.source_stream.seek(SeekFrom::Current(extra_size))?;
-            self.cursor += extra_size as usize;
+        let audio_format = self.read_u16_le()?;
+        let num_channels = self.read_u16_le()?;
+        let sample_rate = self.read_u32_le()?;
+        let byte_rate = self.read_u32_le()?;
+        let block_align = self.read_u16_le()?;
+        let bits_per_sample = self.read_u16_le()?;
+        let remaining = chunk_size - 16;
+
+        if remaining > 0 {
+            self.skip_bytes(remaining)?;
         }
 
         Ok(WaveChunk::Format(FormatChunk {
@@ -368,51 +297,78 @@ impl<'a, R: Read + Seek + Debug> ChunkParser<'a, R> {
     }
 
     /// Parses a "data" chunk.
-    fn parse_data_chunk(&mut self, chunk_size: u32) -> Result<WaveChunk> {
+    fn parse_data_chunk(&mut self, chunk_size: usize) -> Result<WaveChunk> {
         let data_position = self.source_stream.position();
-        self.source_stream
-            .seek(SeekFrom::Current(chunk_size as i64))?;
-        self.cursor += chunk_size as usize;
-
+        self.cursor += chunk_size;
         Ok(WaveChunk::Data(DataChunk {
-            length: chunk_size,
+            length: chunk_size as u32,
             data_position,
         }))
     }
 
     /// Parses a "LIST" chunk.
-    fn parse_list_chunk(&mut self, chunk_size: u32) -> Result<WaveChunk> {
-        let list_type = self.source_stream.read_exact::<4>()?;
-        self.cursor += 4;
+    fn parse_list_chunk(&mut self, chunk_size: usize) -> Result<WaveChunk> {
+        let list_type = self.read_exact::<4>()?;
+        let remaining_size = chunk_size - 4;
+        let mut tags = Vec::new();
 
-        let remaining_size = chunk_size as usize - 4;
-        self.source_stream
-            .seek(SeekFrom::Current(remaining_size as i64))?;
-        self.cursor += remaining_size;
+        if &list_type == b"INFO" {
+            self.parse_info_chunk(remaining_size, &mut tags)?;
+        } else {
+            self.skip_bytes(remaining_size)?;
+        }
 
         Ok(WaveChunk::List(ListChunk {
             list_type,
-            length: chunk_size,
+            length: chunk_size as u32,
+            tags,
         }))
     }
 
-    /// Parses a "fact" chunk.
-    fn parse_fact_chunk(&mut self, chunk_size: u32) -> Result<WaveChunk> {
-        let num_samples = self.source_stream.read_u32_le()?;
-        self.cursor += 4;
+    /// Parses the "INFO" chunk which is a subchunk of the "LIST" chunk.
+    fn parse_info_chunk(&mut self, mut remaining_size: usize, tags: &mut Vec<Tag>) -> Result<()> {
+        while remaining_size >= 8 {
+            // Read the key and size of the tag
+            let tag_key = self.read_exact::<4>()?;
+            let tag_size = self.read_u32_le()? as usize;
+            remaining_size -= 8;
 
-        if chunk_size > 4 {
-            let extra_size = (chunk_size - 4) as i64;
-            self.source_stream.seek(SeekFrom::Current(extra_size))?;
-            self.cursor += extra_size as usize;
+            // Read the value of the tag
+            let tag_value_bytes = self.read_bytes(tag_size)?;
+            let tag_value = String::from_utf8_lossy(&tag_value_bytes)
+                .trim_end_matches(char::from(0))
+                .to_string();
+            remaining_size -= tag_size;
+
+            // Align to even byte if necessary
+            if tag_size % 2 != 0 {
+                self.skip_bytes(1)?;
+                remaining_size -= 1;
+            }
+
+            // Add the tag to the vector
+            tags.push(Tag {
+                tag_type: Some(TagType::from_bytes(&tag_key)),
+                key: String::from_utf8_lossy(&tag_key).into_owned(),
+                value: tag_value,
+            });
         }
+        Ok(())
+    }
 
+    /// Parses a "fact" chunk.
+    fn parse_fact_chunk(&mut self, chunk_size: usize) -> Result<WaveChunk> {
+        let num_samples = self.read_u32_le()?;
+        if chunk_size > 4 {
+            self.skip_bytes(chunk_size - 4)?;
+        }
         Ok(WaveChunk::Fact(FactChunk { num_samples }))
     }
 }
 
 const MAX_FRAMES_PER_PACKET: u64 = 1024;
 
+#[derive(Debug)]
 pub struct PacketInfo {
     pub block_size: u64,
     pub frames_per_block: u64,
@@ -427,23 +383,9 @@ impl PacketInfo {
             max_blocks_per_packet: MAX_FRAMES_PER_PACKET,
         }
     }
-
-    pub fn set_block_size(&mut self, block_size: u64) -> &mut Self {
-        self.block_size = block_size;
-        self
-    }
-
-    pub fn set_frames_per_block(&mut self, frames_per_block: u64) -> &mut Self {
-        self.frames_per_block = frames_per_block;
-        self
-    }
-
-    pub fn set_max_blocks_per_packet(&mut self, max_blocks_per_packet: u64) -> &mut Self {
-        self.max_blocks_per_packet = max_blocks_per_packet;
-        self
-    }
 }
 
+#[derive(Debug)]
 struct WavReaderOptions {
     codec_params: CodecParams,
     metadata: HashMap<String, String>,
@@ -458,29 +400,14 @@ impl Default for WavReaderOptions {
             codec_params: CodecParams::default(),
             metadata: HashMap::new(),
             packet_info: PacketInfo::new(0),
-            ..Default::default()
+            data_start: 0,
+            data_end: 0,
         }
     }
 }
 
-impl WavReaderOptions {
-    fn set_codec_params(&mut self, codec_params: CodecParams) -> &mut Self {
-        self.codec_params = codec_params;
-        self
-    }
-
-    fn set_metadata(&mut self, key: String, value: String) -> &mut Self {
-        self.metadata.insert(key, value);
-        self
-    }
-
-    fn set_packet_info(&mut self, packet_info: PacketInfo) -> &mut Self {
-        self.packet_info = packet_info;
-        self
-    }
-}
-
 /// WAV file reader.
+#[derive(Debug)]
 pub struct WavReader<R: Read + Seek + Debug> {
     source_stream: SourceStream<R>,
     opts: WavReaderOptions,
@@ -489,7 +416,6 @@ pub struct WavReader<R: Read + Seek + Debug> {
 impl<R: Read + Seek + Debug> WavReader<R> {
     const RIFF_HEADER: [u8; 4] = *b"RIFF";
     const WAVE_HEADER: [u8; 4] = *b"WAVE";
-    const INFO_HEADER: [u8; 4] = *b"INFO";
 
     fn new(source_stream: SourceStream<R>, opts: WavReaderOptions) -> Self {
         Self {
@@ -505,59 +431,74 @@ impl<R: Read + Seek + Debug> WavReader<R> {
             return Err(Error::Static("Invalid RIFF header"));
         }
 
-        let chunk_size = source_stream.read_u32_le()?;
+        let chunk_size = source_stream.read_u32_le()? as usize;
         let wave_header = source_stream.read_exact::<4>()?;
         if wave_header != Self::WAVE_HEADER {
             return Err(Error::Static("Invalid WAVE header"));
         }
 
-        let mut opts = WavReaderOptions::default();
-        let mut parser = ChunkParser::new(&mut source_stream, chunk_size as usize - 4);
+        let mut options = WavReaderOptions::default();
+        let mut parser = ChunkParser::new(&mut source_stream, chunk_size);
 
-        parser.for_each_chunk(|chunk| {
-            use WaveChunk::*;
-            match chunk {
-                Format(format) => Self::add_fmt_data(&mut opts, format),
-                Data(data) => Self::add_data_data(&mut opts, data),
-                Fact(fact) => Self::add_fact_data(&mut opts, fact),
-                List(list) => Self::add_list_data(&mut opts, list),
-            }
-            Ok(())
+        parser.parse_chunks(|chunk| match chunk {
+            WaveChunk::Format(format) => Self::handle_format_chunk(&mut options, format),
+            WaveChunk::Data(data) => Self::handle_data_chunk(&mut options, data),
+            WaveChunk::Fact(fact) => Self::handle_fact_chunk(&mut options, fact),
+            WaveChunk::List(list) => Self::handle_list_chunk(&mut options, list),
         })?;
 
-        Ok(Self::new(source_stream, opts))
+        Ok(Self::new(source_stream, options))
     }
 
-    fn add_fmt_data(source: &mut WavReaderOptions, chunk: FormatChunk) {
-        let packet_info = source.packet_info.set_block_size(chunk.block_align as u64);
-        source
-            .codec_params
-            .set_frames_per_block(packet_info.frames_per_block)
-            .set_max_frames_per_packet(packet_info.max_blocks_per_packet);
+    fn handle_format_chunk(options: &mut WavReaderOptions, chunk: FormatChunk) -> Result<()> {
+        options.packet_info.block_size = chunk.block_align as u64;
+        options.codec_params.sample_rate = Some(chunk.sample_rate);
+        options.codec_params.num_channels = chunk.num_channels;
+        options.codec_params.bits_per_sample = Some(chunk.bits_per_sample);
+        options.codec_params.frames_per_block = Some(options.packet_info.frames_per_block);
+        options.codec_params.max_frames_per_packet =
+            Some(options.packet_info.max_blocks_per_packet);
+
+        let sample_format = match chunk.bits_per_sample {
+            8 => SampleFormat::Uint8,
+            16 => SampleFormat::Int16,
+            24 => SampleFormat::Int24,
+            32 => SampleFormat::Int32,
+            _ => return Err(Error::Static("Sample format not supported")),
+        };
+        options.codec_params.sample_format = Some(sample_format);
+
+        Ok(())
     }
 
-    fn add_fact_data(source: &mut WavReaderOptions, chunk: FactChunk) {
-        source.codec_params.set_num_frames(chunk.num_samples as u64);
+    fn handle_fact_chunk(options: &mut WavReaderOptions, chunk: FactChunk) -> Result<()> {
+        options.codec_params.num_frames = Some(chunk.num_samples as u64);
+        Ok(())
     }
 
-    fn add_data_data(source: &mut WavReaderOptions, chunk: DataChunk) {
-        source.data_start = chunk.data_position;
-        source.data_end = chunk.data_position + chunk.length as u64;
+    fn handle_data_chunk(options: &mut WavReaderOptions, chunk: DataChunk) -> Result<()> {
+        options.data_start = chunk.data_position;
+        options.data_end = chunk.data_position + chunk.length as u64;
 
-        let packet_info = &source.packet_info;
-
-        if packet_info.block_size != 0 {
-            let num_frames =
-                chunk.length as u64 / (packet_info.block_size * packet_info.frames_per_block);
-            source.codec_params.set_num_frames(num_frames);
+        if options.packet_info.block_size != 0 {
+            let num_frames = chunk.length as u64
+                / (options.packet_info.block_size * options.packet_info.frames_per_block);
+            options.codec_params.num_frames = Some(num_frames);
         }
+        Ok(())
     }
 
-    fn add_list_data(source: &mut WavReaderOptions, chunk: ListChunk) {}
+    fn handle_list_chunk(options: &mut WavReaderOptions, chunk: ListChunk) -> Result<()> {
+        for tag in chunk.tags {
+            options.metadata.insert(tag.key, tag.value);
+        }
+        Ok(())
+    }
 }
 
-/// Información de tipo basada en claves.
-enum TypeInfo {
+/// Tag type based on keys.
+#[derive(Debug, Clone)]
+pub enum TagType {
     Rating,
     Comment,
     OriginalDate,
@@ -582,32 +523,32 @@ enum TypeInfo {
     Unknown,
 }
 
-impl TypeInfo {
-    /// Convierte un arreglo de 4 bytes a `TypeInfo`.
+impl TagType {
+    /// Converts a 4-byte array to `TagType`.
     fn from_bytes(key: &[u8; 4]) -> Self {
         match key {
-            b"ages" => TypeInfo::Rating,
-            b"cmnt" | b"comm" | b"icmt" => TypeInfo::Comment,
-            b"dtim" | b"idit" => TypeInfo::OriginalDate,
-            b"genr" | b"ignr" | b"isgn" => TypeInfo::Genre,
-            b"iart" => TypeInfo::Artist,
-            b"icop" => TypeInfo::Copyright,
-            b"icrd" | b"year" => TypeInfo::Date,
-            b"ienc" | b"itch" => TypeInfo::EncodedBy,
-            b"ieng" => TypeInfo::Engineer,
-            b"ifrm" => TypeInfo::TrackTotal,
-            b"ilng" | b"lang" => TypeInfo::Language,
-            b"imus" => TypeInfo::Composer,
-            b"inam" | b"titl" => TypeInfo::TrackTitle,
-            b"iprd" => TypeInfo::Album,
-            b"ipro" => TypeInfo::Producer,
-            b"iprt" | b"trck" | b"prt1" | b"prt2" => TypeInfo::TrackNumber,
-            b"isft" => TypeInfo::Encoder,
-            b"isrf" => TypeInfo::MediaFormat,
-            b"iwri" => TypeInfo::Writer,
-            b"torg" => TypeInfo::Label,
-            b"tver" => TypeInfo::Version,
-            _ => TypeInfo::Unknown,
+            b"ages" => TagType::Rating,
+            b"cmnt" | b"comm" | b"icmt" => TagType::Comment,
+            b"dtim" | b"idit" => TagType::OriginalDate,
+            b"genr" | b"ignr" | b"isgn" => TagType::Genre,
+            b"iart" => TagType::Artist,
+            b"icop" => TagType::Copyright,
+            b"icrd" | b"year" => TagType::Date,
+            b"ienc" | b"itch" => TagType::EncodedBy,
+            b"ieng" => TagType::Engineer,
+            b"ifrm" => TagType::TrackTotal,
+            b"ilng" | b"lang" => TagType::Language,
+            b"imus" => TagType::Composer,
+            b"inam" | b"titl" => TagType::TrackTitle,
+            b"iprd" => TagType::Album,
+            b"ipro" => TagType::Producer,
+            b"iprt" | b"trck" | b"prt1" | b"prt2" => TagType::TrackNumber,
+            b"isft" => TagType::Encoder,
+            b"isrf" => TagType::MediaFormat,
+            b"iwri" => TagType::Writer,
+            b"torg" => TagType::Label,
+            b"tver" => TagType::Version,
+            _ => TagType::Unknown,
         }
     }
 }
