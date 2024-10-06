@@ -1,8 +1,6 @@
-use std::{
-    collections::HashMap,
-    fmt::Debug,
-    io::{self, BufReader, Read, Seek, SeekFrom},
-};
+use std::collections::HashMap;
+use std::fmt::Debug;
+use std::io::{self, BufReader, Read, Seek, SeekFrom};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -14,10 +12,10 @@ pub enum Error {
     Io(#[from] io::Error),
 }
 
-/// Specialized `Result` type for operations in this crate.
+/// Tipo especializado Result para operaciones en este crate.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Represents different sample formats.
+/// Representa diferentes formatos de muestra.
 #[derive(Debug)]
 pub enum SampleFormat {
     Uint8,
@@ -26,34 +24,91 @@ pub enum SampleFormat {
     Int32,
 }
 
-/// Represents the time base (rational number as numerator and denominator).
+/// Representa la base de tiempo (número racional como numerador y denominador).
 #[derive(Debug, Default)]
 pub struct TimeBase {
     pub numer: u32,
     pub denom: u32,
 }
 
-/// Represents codec parameters for the WAV file.
+/// Representa los parámetros del códec para el archivo WAV.
 #[derive(Debug, Default)]
-pub struct CodecParams {
-    pub codec: Option<u32>,
+struct CodecParams {
     pub sample_rate: Option<u32>,
-    pub time_base: Option<TimeBase>,
     pub num_frames: Option<u64>,
-    pub start_ts: u64,
     pub sample_format: Option<SampleFormat>,
     pub bits_per_sample: Option<u16>,
-    pub bits_per_coded_sample: Option<u32>,
     pub num_channels: u16,
-    pub delay: Option<u32>,
-    pub padding: Option<u32>,
     pub max_frames_per_packet: Option<u64>,
-    pub packet_data_integrity: bool,
     pub frames_per_block: Option<u64>,
-    pub extra_data: Option<Box<[u8]>>,
 }
 
-/// Represents the "fmt " chunk in a WAV file.
+/// Una Tag encapsula un par clave-valor de metadatos.
+#[derive(Clone, Debug)]
+pub struct Tag {
+    pub tag_type: Option<TagType>,
+    pub key: String,
+    pub value: String,
+}
+
+/// Tipo de etiqueta basado en claves.
+#[derive(Debug, Clone)]
+pub enum TagType {
+    Rating,
+    Comment,
+    OriginalDate,
+    Genre,
+    Artist,
+    Copyright,
+    Date,
+    EncodedBy,
+    Engineer,
+    TrackTotal,
+    Language,
+    Composer,
+    TrackTitle,
+    Album,
+    Producer,
+    TrackNumber,
+    Encoder,
+    MediaFormat,
+    Writer,
+    Label,
+    Version,
+    Unknown,
+}
+
+impl TagType {
+    /// Convierte un arreglo de 4 bytes a TagType.
+    fn from_bytes(key: &[u8; 4]) -> Self {
+        match key {
+            b"ages" => TagType::Rating,
+            b"cmnt" | b"comm" | b"icmt" => TagType::Comment,
+            b"dtim" | b"idit" => TagType::OriginalDate,
+            b"genr" | b"ignr" | b"isgn" => TagType::Genre,
+            b"iart" => TagType::Artist,
+            b"icop" => TagType::Copyright,
+            b"icrd" | b"year" => TagType::Date,
+            b"ienc" | b"itch" => TagType::EncodedBy,
+            b"ieng" => TagType::Engineer,
+            b"ifrm" => TagType::TrackTotal,
+            b"ilng" | b"lang" => TagType::Language,
+            b"imus" => TagType::Composer,
+            b"inam" | b"titl" => TagType::TrackTitle,
+            b"iprd" => TagType::Album,
+            b"ipro" => TagType::Producer,
+            b"iprt" | b"trck" | b"prt1" | b"prt2" => TagType::TrackNumber,
+            b"isft" => TagType::Encoder,
+            b"isrf" => TagType::MediaFormat,
+            b"iwri" => TagType::Writer,
+            b"torg" => TagType::Label,
+            b"tver" => TagType::Version,
+            _ => TagType::Unknown,
+        }
+    }
+}
+
+/// Representa el chunk "fmt " en un archivo WAV.
 pub struct FormatChunk {
     audio_format: u16,
     num_channels: u16,
@@ -64,31 +119,31 @@ pub struct FormatChunk {
 }
 
 impl FormatChunk {
-    /// Returns the number of bytes per sample.
+    /// Retorna el número de bytes por muestra.
     pub fn bytes_per_sample(&self) -> u16 {
         self.bits_per_sample / 8
     }
 }
 
-/// Represents the "LIST" chunk in a WAV file.
+/// Representa el chunk "LIST" en un archivo WAV.
 pub struct ListChunk {
     list_type: [u8; 4],
     length: u32,
     tags: Vec<Tag>,
 }
 
-/// Represents the "fact" chunk in a WAV file.
+/// Representa el chunk "fact" en un archivo WAV.
 pub struct FactChunk {
     num_samples: u32,
 }
 
-/// Represents the "data" chunk in a WAV file.
+/// Representa el chunk "data" en un archivo WAV.
 pub struct DataChunk {
     length: u32,
     data_position: u64,
 }
 
-/// Enum representing various WAV chunk types.
+/// Enum representando varios tipos de chunks WAV.
 pub enum WaveChunk {
     Format(FormatChunk),
     List(ListChunk),
@@ -96,7 +151,7 @@ pub enum WaveChunk {
     Data(DataChunk),
 }
 
-/// Enum for identifying chunk types based on their ID.
+/// Enum para identificar tipos de chunks basados en su ID.
 pub enum ChunkType {
     Format,
     List,
@@ -106,7 +161,7 @@ pub enum ChunkType {
 }
 
 impl ChunkType {
-    /// Converts a 4-byte ID into a corresponding `ChunkType`.
+    /// Convierte un ID de 4 bytes en el correspondiente ChunkType.
     pub fn from_id(id: &[u8; 4]) -> Self {
         match id {
             b"fmt " => ChunkType::Format,
@@ -118,19 +173,7 @@ impl ChunkType {
     }
 }
 
-/// A `Tag` encapsulates a key-value pair of metadata.
-#[derive(Clone, Debug)]
-pub struct Tag {
-    pub tag_type: Option<TagType>,
-    pub key: String,
-    pub value: String,
-}
-
-/// Byte order types (not used in the refactored code, so removed).
-
-const BUFFER_SIZE: usize = 1024 * 16;
-
-/// A buffered source stream for reading data from a WAV file.
+/// Un flujo de origen con buffer para leer datos de un archivo WAV.
 #[derive(Debug)]
 pub struct SourceStream<R: Read + Seek + Debug> {
     reader: BufReader<R>,
@@ -138,13 +181,15 @@ pub struct SourceStream<R: Read + Seek + Debug> {
 }
 
 impl<R: Read + Seek + Debug> SourceStream<R> {
-    /// Creates a new `SourceStream` with the given reader.
+    const BUFFER_SIZE: usize = 1024 * 16;
+
+    /// Crea un nuevo SourceStream con el lector dado.
     pub fn new(reader: R) -> Self {
-        let reader = BufReader::with_capacity(BUFFER_SIZE, reader);
+        let reader = BufReader::with_capacity(Self::BUFFER_SIZE, reader);
         Self { reader, abs_pos: 0 }
     }
 
-    /// Reads exactly `N` bytes from the source stream.
+    /// Lee exactamente N bytes del flujo de origen.
     pub fn read_exact<const N: usize>(&mut self) -> Result<[u8; N]> {
         let mut result = [0u8; N];
         self.reader.read_exact(&mut result)?;
@@ -152,32 +197,32 @@ impl<R: Read + Seek + Debug> SourceStream<R> {
         Ok(result)
     }
 
-    /// Reads a `u16` in little-endian format.
+    /// Lee un u16 en formato little-endian.
     pub fn read_u16_le(&mut self) -> Result<u16> {
         let bytes = self.read_exact::<2>()?;
         Ok(u16::from_le_bytes(bytes))
     }
 
-    /// Reads a `u32` in little-endian format.
+    /// Lee un u32 en formato little-endian.
     pub fn read_u32_le(&mut self) -> Result<u32> {
         let bytes = self.read_exact::<4>()?;
         Ok(u32::from_le_bytes(bytes))
     }
 
-    /// Seeks to a specific position in the stream.
+    /// Busca una posición específica en el flujo.
     pub fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
         let new_pos = self.reader.seek(pos)?;
         self.abs_pos = new_pos;
         Ok(new_pos)
     }
 
-    /// Returns the current position in the stream.
+    /// Retorna la posición actual en el flujo.
     pub fn position(&self) -> u64 {
         self.abs_pos
     }
 }
 
-/// Parses chunks from a WAV file.
+/// Analiza chunks de un archivo WAV.
 struct ChunkParser<'a, R: Read + Seek + Debug> {
     source_stream: &'a mut SourceStream<R>,
     cursor: usize,
@@ -185,7 +230,7 @@ struct ChunkParser<'a, R: Read + Seek + Debug> {
 }
 
 impl<'a, R: Read + Seek + Debug> ChunkParser<'a, R> {
-    /// Creates a new chunk parser with the given source stream and length.
+    /// Crea un nuevo analizador de chunks con el flujo de origen y longitud dados.
     pub fn new(source_stream: &'a mut SourceStream<R>, length: usize) -> Self {
         Self {
             source_stream,
@@ -194,7 +239,7 @@ impl<'a, R: Read + Seek + Debug> ChunkParser<'a, R> {
         }
     }
 
-    /// Aligns the cursor to the next 2-byte boundary, if needed.
+    /// Alinea el cursor al siguiente límite de 2 bytes, si es necesario.
     fn align(&mut self) -> Result<()> {
         if self.cursor & 1 != 0 {
             self.skip_bytes(1)?;
@@ -202,18 +247,20 @@ impl<'a, R: Read + Seek + Debug> ChunkParser<'a, R> {
         Ok(())
     }
 
-    /// Moves the cursor by the specified number of bytes.
+    /// Mueve el cursor por el número especificado de bytes.
     fn skip_bytes(&mut self, n: usize) -> Result<()> {
         self.source_stream.seek(SeekFrom::Current(n as i64))?;
         self.cursor += n;
         Ok(())
     }
 
+    #[inline]
     fn read_u16_le(&mut self) -> Result<u16> {
         let bytes = self.read_exact::<2>()?;
         Ok(u16::from_le_bytes(bytes))
     }
 
+    #[inline]
     fn read_u32_le(&mut self) -> Result<u32> {
         let bytes = self.read_exact::<4>()?;
         Ok(u32::from_le_bytes(bytes))
@@ -233,23 +280,23 @@ impl<'a, R: Read + Seek + Debug> ChunkParser<'a, R> {
         Ok(buffer)
     }
 
-    /// Iterates over each chunk and applies the given function to each.
+    /// Itera sobre cada chunk y aplica la función dada a cada uno.
     pub fn parse_chunks<F>(&mut self, mut f: F) -> Result<()>
     where
         F: FnMut(WaveChunk) -> Result<()>,
     {
         while self.cursor + 8 <= self.length {
-            // Read the chunk ID and size.
+            // Lee el ID del chunk y su tamaño.
             let chunk_id = self.read_exact::<4>()?;
             let chunk_size = self.read_u32_le()?;
             let chunk_size_usize = chunk_size as usize;
 
-            // Check if the chunk_size exceeds the remaining bytes.
+            // Verifica si el tamaño del chunk excede los bytes restantes.
             if self.length - self.cursor < chunk_size_usize {
                 return Err(Error::Static("Chunk size exceeds the remaining length"));
             }
 
-            // Process the chunk based on its ID.
+            // Procesa el chunk basado en su ID.
             let chunk = match ChunkType::from_id(&chunk_id) {
                 ChunkType::Format => self.parse_format_chunk(chunk_size_usize)?,
                 ChunkType::Data => self.parse_data_chunk(chunk_size_usize)?,
@@ -268,7 +315,7 @@ impl<'a, R: Read + Seek + Debug> ChunkParser<'a, R> {
         Ok(())
     }
 
-    /// Parses a "fmt " chunk.
+    /// Analiza un chunk "fmt ".
     fn parse_format_chunk(&mut self, chunk_size: usize) -> Result<WaveChunk> {
         if chunk_size < 16 {
             return Err(Error::Static("Invalid format chunk size"));
@@ -296,7 +343,7 @@ impl<'a, R: Read + Seek + Debug> ChunkParser<'a, R> {
         }))
     }
 
-    /// Parses a "data" chunk.
+    /// Analiza un chunk "data".
     fn parse_data_chunk(&mut self, chunk_size: usize) -> Result<WaveChunk> {
         let data_position = self.source_stream.position();
         self.cursor += chunk_size;
@@ -306,7 +353,7 @@ impl<'a, R: Read + Seek + Debug> ChunkParser<'a, R> {
         }))
     }
 
-    /// Parses a "LIST" chunk.
+    /// Analiza un chunk "LIST".
     fn parse_list_chunk(&mut self, chunk_size: usize) -> Result<WaveChunk> {
         let list_type = self.read_exact::<4>()?;
         let remaining_size = chunk_size - 4;
@@ -325,28 +372,28 @@ impl<'a, R: Read + Seek + Debug> ChunkParser<'a, R> {
         }))
     }
 
-    /// Parses the "INFO" chunk which is a subchunk of the "LIST" chunk.
+    /// Analiza el chunk "INFO", que es un subchunk del chunk "LIST".
     fn parse_info_chunk(&mut self, mut remaining_size: usize, tags: &mut Vec<Tag>) -> Result<()> {
         while remaining_size >= 8 {
-            // Read the key and size of the tag
+            // Lee la clave y el tamaño de la etiqueta.
             let tag_key = self.read_exact::<4>()?;
             let tag_size = self.read_u32_le()? as usize;
             remaining_size -= 8;
 
-            // Read the value of the tag
+            // Lee el valor de la etiqueta.
             let tag_value_bytes = self.read_bytes(tag_size)?;
             let tag_value = String::from_utf8_lossy(&tag_value_bytes)
                 .trim_end_matches(char::from(0))
                 .to_string();
             remaining_size -= tag_size;
 
-            // Align to even byte if necessary
+            // Alinea a byte par si es necesario.
             if tag_size % 2 != 0 {
                 self.skip_bytes(1)?;
                 remaining_size -= 1;
             }
 
-            // Add the tag to the vector
+            // Agrega la etiqueta al vector.
             tags.push(Tag {
                 tag_type: Some(TagType::from_bytes(&tag_key)),
                 key: String::from_utf8_lossy(&tag_key).into_owned(),
@@ -356,7 +403,7 @@ impl<'a, R: Read + Seek + Debug> ChunkParser<'a, R> {
         Ok(())
     }
 
-    /// Parses a "fact" chunk.
+    /// Analiza un chunk "fact".
     fn parse_fact_chunk(&mut self, chunk_size: usize) -> Result<WaveChunk> {
         let num_samples = self.read_u32_le()?;
         if chunk_size > 4 {
@@ -406,7 +453,7 @@ impl Default for WavReaderOptions {
     }
 }
 
-/// WAV file reader.
+/// Lector de archivos WAV.
 #[derive(Debug)]
 pub struct WavReader<R: Read + Seek + Debug> {
     source_stream: SourceStream<R>,
@@ -424,7 +471,7 @@ impl<R: Read + Seek + Debug> WavReader<R> {
         }
     }
 
-    /// Tries to create a new `WavReader` by parsing the WAV file headers.
+    /// Intenta crear un nuevo WavReader analizando las cabeceras del archivo WAV.
     pub fn try_new(mut source_stream: SourceStream<R>) -> Result<Self> {
         let riff_header = source_stream.read_exact::<4>()?;
         if riff_header != Self::RIFF_HEADER {
@@ -494,61 +541,99 @@ impl<R: Read + Seek + Debug> WavReader<R> {
         }
         Ok(())
     }
+
+    pub fn packets(&mut self) -> PacketIterator<R> {
+        PacketIterator::new(self)
+    }
+
+    pub fn num_packets(&self) -> u64 {
+        let num_frames = self.opts.codec_params.num_frames.unwrap_or(0);
+        let frames_per_block = self.opts.packet_info.frames_per_block;
+        let block_size = self.opts.packet_info.block_size;
+        let frames_per_packet = frames_per_block * block_size;
+        (num_frames + frames_per_packet - 1) / frames_per_packet
+    }
+
+    pub fn num_frames(&self) -> u64 {
+        self.opts.codec_params.num_frames.unwrap_or(0)
+    }
+
+    pub fn sample_rate(&self) -> u32 {
+        self.opts.codec_params.sample_rate.unwrap_or(0)
+    }
+
+    pub fn num_channels(&self) -> u16 {
+        self.opts.codec_params.num_channels
+    }
+
+    pub fn bits_per_sample(&self) -> u16 {
+        self.opts.codec_params.bits_per_sample.unwrap_or(0)
+    }
+
+    pub fn sample_format(&self) -> &SampleFormat {
+        self.opts.codec_params.sample_format.as_ref().unwrap()
+    }
+
+    pub fn metadata(&self) -> &HashMap<String, String> {
+        &self.opts.metadata
+    }
+
+    pub fn num_frames_per_block(&self) -> u64 {
+        self.opts.packet_info.frames_per_block
+    }
+
+    pub fn data_start(&self) -> u64 {
+        self.opts.data_start
+    }
+
+    pub fn data_end(&self) -> u64 {
+        self.opts.data_end
+    }
 }
 
-/// Tag type based on keys.
-#[derive(Debug, Clone)]
-pub enum TagType {
-    Rating,
-    Comment,
-    OriginalDate,
-    Genre,
-    Artist,
-    Copyright,
-    Date,
-    EncodedBy,
-    Engineer,
-    TrackTotal,
-    Language,
-    Composer,
-    TrackTitle,
-    Album,
-    Producer,
-    TrackNumber,
-    Encoder,
-    MediaFormat,
-    Writer,
-    Label,
-    Version,
-    Unknown,
+pub struct PacketIterator<'a, R: Read + Seek + Debug> {
+    reader: &'a mut WavReader<R>,
+    current_pos: u64,
 }
 
-impl TagType {
-    /// Converts a 4-byte array to `TagType`.
-    fn from_bytes(key: &[u8; 4]) -> Self {
-        match key {
-            b"ages" => TagType::Rating,
-            b"cmnt" | b"comm" | b"icmt" => TagType::Comment,
-            b"dtim" | b"idit" => TagType::OriginalDate,
-            b"genr" | b"ignr" | b"isgn" => TagType::Genre,
-            b"iart" => TagType::Artist,
-            b"icop" => TagType::Copyright,
-            b"icrd" | b"year" => TagType::Date,
-            b"ienc" | b"itch" => TagType::EncodedBy,
-            b"ieng" => TagType::Engineer,
-            b"ifrm" => TagType::TrackTotal,
-            b"ilng" | b"lang" => TagType::Language,
-            b"imus" => TagType::Composer,
-            b"inam" | b"titl" => TagType::TrackTitle,
-            b"iprd" => TagType::Album,
-            b"ipro" => TagType::Producer,
-            b"iprt" | b"trck" | b"prt1" | b"prt2" => TagType::TrackNumber,
-            b"isft" => TagType::Encoder,
-            b"isrf" => TagType::MediaFormat,
-            b"iwri" => TagType::Writer,
-            b"torg" => TagType::Label,
-            b"tver" => TagType::Version,
-            _ => TagType::Unknown,
+impl<'a, R: Read + Seek + Debug> PacketIterator<'a, R> {
+    fn new(reader: &'a mut WavReader<R>) -> Self {
+        let current_pos = reader.opts.data_start;
+        Self {
+            current_pos,
+            reader,
+        }
+    }
+}
+
+impl<'a, R: Read + Seek + Debug> Iterator for PacketIterator<'a, R> {
+    type Item = Result<Vec<u8>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current_pos >= self.reader.opts.data_end {
+            return None;
+        }
+
+        let block_size = self.reader.opts.packet_info.block_size;
+        let frames_per_block = self.reader.opts.packet_info.frames_per_block;
+        let max_blocks_per_packet = self.reader.opts.packet_info.max_blocks_per_packet;
+
+        // Calcular el tamaño total del paquete.
+        let remaining_blocks = (self.reader.opts.data_end - self.current_pos) / block_size;
+        let blocks_to_read = remaining_blocks.min(max_blocks_per_packet);
+        let packet_size = blocks_to_read * block_size;
+
+        if packet_size == 0 {
+            return None;
+        }
+
+        let mut packet = vec![0; packet_size as usize];
+        match self.reader.source_stream.reader.read_exact(&mut packet) {
+            Ok(_) => {
+                self.current_pos += packet_size * frames_per_block;
+                Some(Ok(packet))
+            }
+            Err(e) => Some(Err(Error::from(e))),
         }
     }
 }
