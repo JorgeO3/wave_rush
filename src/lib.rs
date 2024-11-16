@@ -1,3 +1,4 @@
+use derive_more::{Add, Sub};
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
@@ -214,6 +215,13 @@ impl<R: Read + Seek + Debug> SourceStream<R> {
         let new_pos = self.reader.seek(pos)?;
         self.abs_pos = new_pos;
         Ok(new_pos)
+    }
+
+    /// Lee datos del flujo de origen en el buffer dado.
+    pub fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        let n = self.reader.read(buf)?;
+        self.abs_pos += n as u64;
+        Ok(n)
     }
 
     /// Retorna la posición actual en el flujo.
@@ -607,19 +615,18 @@ impl<'a, R: Read + Seek + Debug> PacketIterator<'a, R> {
 }
 
 impl<'a, R: Read + Seek + Debug> Iterator for PacketIterator<'a, R> {
-    type Item = Result<Vec<u8>>;
+    type Item = Vec<u8>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.current_pos >= self.reader.opts.data_end {
             return None;
         }
 
-        let block_size = self.reader.opts.packet_info.block_size;
-        let frames_per_block = self.reader.opts.packet_info.frames_per_block;
-        let max_blocks_per_packet = self.reader.opts.packet_info.max_blocks_per_packet;
+        let opts = &self.reader.opts;
+        let block_size = opts.packet_info.block_size;
+        let max_blocks_per_packet = opts.packet_info.max_blocks_per_packet;
 
-        // Calcular el tamaño total del paquete.
-        let remaining_blocks = (self.reader.opts.data_end - self.current_pos) / block_size;
+        let remaining_blocks = (opts.data_end - self.current_pos) / block_size;
         let blocks_to_read = remaining_blocks.min(max_blocks_per_packet);
         let packet_size = blocks_to_read * block_size;
 
@@ -628,12 +635,138 @@ impl<'a, R: Read + Seek + Debug> Iterator for PacketIterator<'a, R> {
         }
 
         let mut packet = vec![0; packet_size as usize];
-        match self.reader.source_stream.reader.read_exact(&mut packet) {
-            Ok(_) => {
-                self.current_pos += packet_size * frames_per_block;
-                Some(Ok(packet))
-            }
-            Err(e) => Some(Err(Error::from(e))),
+        if self.reader.source_stream.read(&mut packet).is_ok() {
+            self.current_pos += packet_size;
+            Some(packet)
+        } else {
+            None
         }
+    }
+}
+
+pub trait Sample:
+    Copy
+    + Clone
+    + core::ops::Add<Output = Self>
+    + core::ops::Sub<Output = Self>
+    + Default
+    + PartialOrd
+    + PartialEq
+    + Sized
+{
+    /// A unique enum value representing the sample format. This constant may be used to dynamically
+    /// choose how to process the sample at runtime.
+    const FORMAT: SampleFormat;
+
+    /// The effective number of bits of the valid (clamped) sample range. Quantifies the dynamic
+    /// range of the sample format in bits.
+    const EFF_BITS: u32;
+
+    /// The mid-point value between the maximum and minimum sample value. If a sample is set to this
+    /// value it is silent.
+    const MID: Self;
+
+    /// If the sample format does not use the full range of the underlying data type, returns the
+    /// sample clamped to the valid range. Otherwise, returns the sample unchanged.
+    fn clamped(self) -> Self;
+}
+
+impl Sample for u8 {
+    const FORMAT: SampleFormat = SampleFormat::Uint8;
+    const EFF_BITS: u32 = 8;
+    const MID: Self = 128;
+
+    #[inline]
+    fn clamped(self) -> Self {
+        self
+    }
+}
+
+impl Sample for i16 {
+    const FORMAT: SampleFormat = SampleFormat::Int16;
+    const EFF_BITS: u32 = 16;
+    const MID: Self = 0;
+
+    #[inline]
+    fn clamped(self) -> Self {
+        self
+    }
+}
+
+#[allow(non_camel_case_types)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Default, Add, Sub)]
+struct i24(i32);
+impl Sample for i24 {
+    const FORMAT: SampleFormat = SampleFormat::Int24;
+    const EFF_BITS: u32 = 24;
+    const MID: Self = i24(0);
+
+    #[inline]
+    fn clamped(self) -> Self {
+        i24(self.0.clamp(-8_388_608, 8_388_607))
+    }
+}
+
+impl Sample for i32 {
+    const FORMAT: SampleFormat = SampleFormat::Int32;
+    const EFF_BITS: u32 = 32;
+    const MID: Self = 0;
+
+    #[inline]
+    fn clamped(self) -> Self {
+        self
+    }
+}
+
+struct AudioSpec {
+    sample_rate: u32,
+    num_channels: u8,
+    // bits_per_sample: u16,
+    // sample_format: SampleFormat,
+    // num_frames: u64,
+    // max_frames_per_packet: u64,
+    // frames_per_block: u64,
+}
+
+struct RawAudioBuffer<S: Sample> {
+    buffer: Vec<S>,
+    spec: AudioSpec,
+    n_frames: usize,
+    n_capacity: usize,
+}
+
+enum AudioBuffer {
+    Uint8(RawAudioBuffer<u8>),
+    Int16(RawAudioBuffer<i16>),
+    Int24(RawAudioBuffer<i24>),
+    Int32(RawAudioBuffer<i32>),
+}
+
+struct WavDecoder {
+    params: CodecParams,
+    coded_width: u16,
+    buffer: AudioBuffer,
+}
+
+impl WavDecoder {
+    fn try_new(params: &CodecParams) -> Result<Self> {
+        let Some(frames) = params.max_frames_per_packet else {
+            return Err(Error::Static("max_frames_per_packet not set"));
+        };
+
+        let Some(rate) = params.sample_rate else {
+            return Err(Error::Static("sample_rate not set"));
+        };
+
+        if params.num_channels < 1 || params.num_channels > 2 {
+            return Err(Error::Static("Invalid number of channels"));
+        }
+
+        let spec = AudioSpec {
+            sample_rate: rate,
+            num_channels: params.num_channels as u8,
+        };
+
+        todo!("Finish implementing WavDecoder");
     }
 }
