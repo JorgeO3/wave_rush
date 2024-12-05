@@ -1,9 +1,11 @@
+// #![allow(unused)]
+use thiserror::Error;
 use derive_more::{Add, Sub};
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Error)]
 pub enum Error {
     #[error("{0}")]
     Static(&'static str),
@@ -23,6 +25,18 @@ pub enum SampleFormat {
     Int16,
     Int24,
     Int32,
+}
+
+impl SampleFormat {
+    /// Retorna el número de bytes por muestra.
+    pub fn bytes_per_sample(&self) -> u16 {
+        match self {
+            SampleFormat::Uint8 => 1,
+            SampleFormat::Int16 => 2,
+            SampleFormat::Int24 => 3,
+            SampleFormat::Int32 => 4,
+        }
+    }
 }
 
 /// Representa la base de tiempo (número racional como numerador y denominador).
@@ -742,6 +756,12 @@ enum AudioBuffer {
     Int32(RawAudioBuffer<i32>),
 }
 
+impl AudioBuffer {
+    fn new(spec: AudioSpec, n_frames: usize, n_capacity: usize) -> Self {
+        todo!("Implement AudioBuffer::new");
+    }
+}
+
 struct WavDecoder {
     params: CodecParams,
     coded_width: u16,
@@ -767,6 +787,10 @@ impl WavDecoder {
             num_channels: params.num_channels as u8,
         };
 
-        todo!("Finish implementing WavDecoder");
+        let coded_width = Some(params.bits_per_sample) else {
+            return Err(Error::Static("bits_per_sample not set"));
+        };
+
+        todo!()
     }
 }

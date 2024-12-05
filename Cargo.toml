@@ -3,7 +3,10 @@ name = "wave_rush"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "wave_rushv2"
+path = "src/libv2.rs"
+
+
 [dependencies]
-derive_more = { version = "1.0.0", features = ["add", "sum"] }
-rayon = "1.10.0"
-thiserror = "1.0.63"
+thiserror = "2.0.3"
