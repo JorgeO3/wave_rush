@@ -1,4 +1,5 @@
 #![allow(unused)]
+use std::arch::x86_64::*;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
@@ -577,29 +578,245 @@ impl<R: Read + Seek + Debug> Iterator for PacketsIterator<'_, R> {
         }
 
         let total_samples = bytes_to_read / bytes_per_sample;
-        let mut packets = Vec::with_capacity(total_samples);
-
-        for i in 0..total_samples {
-            let start = i * bytes_per_sample;
-            let end = start + bytes_per_sample;
-
-            if end > self.buffer.len() {
-                break; // Not enough bytes left
-            }
-
-            let sample = match self.sample_format {
-                SampleFormat::Uint8 => u8_to_i32(self.buffer[start]),
-                SampleFormat::Int16 => i16_to_i32(&self.buffer[start..end]),
-                SampleFormat::Int24 => i24_to_i32(&self.buffer[start..end]),
-                SampleFormat::Int32 => i32_to_i32(&self.buffer[start..end]),
-            };
-
-            packets.push(sample);
-        }
+        let packets = match self.sample_format {
+            SampleFormat::Int16 => unsafe { decode_int16_simd(&self.buffer, total_samples) },
+            SampleFormat::Uint8 => unsafe { decode_uint8_simd(&self.buffer, total_samples) },
+            SampleFormat::Int32 => unsafe { decode_int32_simd(&self.buffer, total_samples) },
+            SampleFormat::Int24 => decode_int24_scalar(&self.buffer, total_samples),
+        };
 
         Some(Ok(packets))
     }
 }
+
+#[target_feature(enable = "sse4.1")]
+unsafe fn decode_uint8_simd(buffer: &[u8], total_samples: usize) -> Vec<i32> {
+    let mut packets = Vec::with_capacity(total_samples);
+
+    let mut i = 0;
+    let offset = _mm_set1_epi8(128u8 as i8);
+    while i + 16 <= total_samples {
+        let ptr = buffer.as_ptr().add(i) as *const __m128i;
+        let chunk = _mm_loadu_si128(ptr);
+        // Resta 128 a cada byte
+        let adjusted = _mm_sub_epi8(chunk, offset);
+
+        // Convertimos esos i8 a i16 (bajas 8 muestras)
+        let low_16 = _mm_cvtepi8_epi16(adjusted);
+
+        // 8 muestras altas: desplazamos 8 bytes
+        let high_bytes = _mm_srli_si128(adjusted, 8);
+        let high_16 = _mm_cvtepi8_epi16(high_bytes);
+
+        // Ahora extendemos i16 a i32
+        // bajas 4 i16
+        let low_i32_1 = _mm_cvtepi16_epi32(low_16);
+        // altas 4 i16 del low_16
+        let low_16_high = _mm_srli_si128(low_16, 4);
+        let low_i32_2 = _mm_cvtepi16_epi32(low_16_high);
+
+        // Para el high_16 lo mismo:
+        let high_i32_1 = _mm_cvtepi16_epi32(high_16);
+        let high_16_high = _mm_srli_si128(high_16, 4);
+        let high_i32_2 = _mm_cvtepi16_epi32(high_16_high);
+
+        let mut temp = [0i32; 16];
+        _mm_storeu_si128(temp.as_mut_ptr() as *mut __m128i, low_i32_1);
+        _mm_storeu_si128(temp.as_mut_ptr().add(4) as *mut __m128i, low_i32_2);
+        _mm_storeu_si128(temp.as_mut_ptr().add(8) as *mut __m128i, high_i32_1);
+        _mm_storeu_si128(temp.as_mut_ptr().add(12) as *mut __m128i, high_i32_2);
+
+        packets.extend_from_slice(&temp);
+        i += 16;
+    }
+
+    // Resto sin SIMD
+    packets.extend(buffer[i..total_samples].iter().map(|&b| u8_to_i32(b)));
+
+    packets
+}
+
+#[target_feature(enable = "sse4.1")]
+unsafe fn decode_int16_simd(buffer: &[u8], total_samples: usize) -> Vec<i32> {
+    let mut packets = Vec::with_capacity(total_samples);
+    let mut i = 0;
+    while i + 8 <= total_samples {
+        let ptr = buffer.as_ptr().add(i * 2) as *const __m128i;
+        let chunk = _mm_loadu_si128(ptr);
+        let low_i32 = _mm_cvtepi16_epi32(chunk);
+        let high_half = _mm_srli_si128(chunk, 8);
+        let high_i32 = _mm_cvtepi16_epi32(high_half);
+
+        let mut temp = [0i32; 8];
+        _mm_storeu_si128(temp.as_mut_ptr() as *mut __m128i, low_i32);
+        _mm_storeu_si128(temp.as_mut_ptr().add(4) as *mut __m128i, high_i32);
+
+        packets.extend_from_slice(&temp);
+        i += 8;
+    }
+
+    for j in i..total_samples {
+        let start = j * 2;
+        packets.push(i16_to_i32(&buffer[start..start + 2]));
+    }
+
+    packets
+}
+
+fn decode_int24_scalar(buffer: &[u8], total_samples: usize) -> Vec<i32> {
+    // Int24 es complicado de vectorizar debido a que 3 bytes por muestra no alinean bien con 128 bits.
+    // Podrías crear lógica para empaquetar bytes en vectores y extraerlos,
+    // pero es complejo y puede no justificarlo.
+    // Aquí lo mantenemos escalar:
+    let mut packets = Vec::with_capacity(total_samples);
+    for i in 0..total_samples {
+        let start = i * 3;
+        let end = start + 3;
+        if end > buffer.len() {
+            break;
+        }
+        packets.push(i24_to_i32(&buffer[start..end]));
+    }
+    packets
+}
+
+#[target_feature(enable = "sse2")]
+unsafe fn decode_int32_simd(buffer: &[u8], total_samples: usize) -> Vec<i32> {
+    // En int32 las muestras ya están en i32 (little-endian).
+    // Podemos cargar 4 i32 a la vez (16 bytes = 128 bits).
+    let mut packets = Vec::with_capacity(total_samples);
+    let mut i = 0;
+    while i + 4 <= total_samples {
+        let ptr = buffer.as_ptr().add(i * 4) as *const __m128i;
+        // i*4 porque cada i32 = 4 bytes
+        let chunk = _mm_loadu_si128(ptr);
+        let mut temp = [0i32; 4];
+        _mm_storeu_si128(temp.as_mut_ptr() as *mut __m128i, chunk);
+        packets.extend_from_slice(&temp);
+        i += 4;
+    }
+
+    // Resto sin SIMD
+    for j in i..total_samples {
+        let start = j * 4;
+        let bytes = &buffer[start..start + 4];
+        packets.push(i32_to_i32(bytes));
+    }
+
+    packets
+}
+
+// Función interna con SIMD y target_feature
+// impl<'a, R: Read + Seek + Debug> PacketsIterator<'a, R> {
+//     #[target_feature(enable = "sse4.2")]
+//     unsafe fn next(&mut self) -> Option<Result<Vec<i32>>> {
+//         let pos = match self.reader.stream_position() {
+//             Ok(pos) => pos,
+//             Err(e) => return Some(Err(Error::Io(e))),
+//         };
+
+//         if pos >= self.data_end {
+//             return None; // No hay más datos
+//         }
+
+//         let bytes_per_sample = self.sample_format.bytes_per_sample() as usize;
+//         let total_sample_size = bytes_per_sample * self.num_channels as usize;
+//         let packet_len_bytes = total_sample_size * PACK_SIZE;
+
+//         let remaining = (self.data_end - pos) as usize;
+//         let bytes_to_read = remaining.min(packet_len_bytes);
+//         self.buffer.resize(bytes_to_read, 0);
+
+//         if let Err(e) = self.reader.read_exact(&mut self.buffer) {
+//             return Some(Err(Error::Io(e)));
+//         }
+
+//         let total_samples = bytes_to_read / bytes_per_sample;
+//         let mut packets = Vec::with_capacity(total_samples);
+
+// for i in 0..total_samples {
+//     let start = i * bytes_per_sample;
+//     let end = start + bytes_per_sample;
+
+//     if end > self.buffer.len() {
+//         break; // Not enough bytes left
+//     }
+
+//     let sample = match self.sample_format {
+//         SampleFormat::Uint8 => u8_to_i32(self.buffer[start]),
+//         SampleFormat::Int16 => i16_to_i32(&self.buffer[start..end]),
+//         SampleFormat::Int24 => i24_to_i32(&self.buffer[start..end]),
+//         SampleFormat::Int32 => i32_to_i32(&self.buffer[start..end]),
+//     };
+
+//     packets.push(sample);
+// }
+
+//         // Si el formato no es Int16, hacemos el loop "lento"
+//         if self.sample_format != SampleFormat::Int16 {
+//             for i in 0..total_samples {
+//                 let start = i * bytes_per_sample;
+//                 let end = start + bytes_per_sample;
+//                 if end > self.buffer.len() {
+//                     break;
+//                 }
+//                 let sample = match self.sample_format {
+//                     SampleFormat::Uint8 => u8_to_i32(self.buffer[start]),
+//                     SampleFormat::Int16 => i16_to_i32(&self.buffer[start..end]),
+//                     SampleFormat::Int24 => i24_to_i32(&self.buffer[start..end]),
+//                     SampleFormat::Int32 => i32_to_i32(&self.buffer[start..end]),
+//                 };
+//                 packets.push(sample);
+//             }
+//             return Some(Ok(packets));
+//         }
+
+//         // Caso Int16 -> i32 con SIMD:
+//         // Podemos cargar 8 muestras de 16 bits (8*16=128 bits) en un registro SSE.
+//         // Luego extenderlas a i32 usando `_mm_cvtepi16_epi32`, que convierte 4 i16 en 4 i32.
+//         // Necesitaremos dos llamadas por cada 8 muestras.
+
+//         let mut i = 0;
+//         let len = total_samples;
+//         // Cada iteración procesará 8 muestras de 16 bits.
+//         while i + 8 <= len {
+//             let ptr = self.buffer.as_ptr().add(i * 2) as *const __m128i;
+//             // i*2 porque cada i16 ocupa 2 bytes
+
+//             // Cargamos 8 i16
+//             let chunk = _mm_loadu_si128(ptr);
+
+//             // Extrae las primeras 4 i16 (bajas) y las convierte a i32
+//             let low_i32 = _mm_cvtepi16_epi32(chunk);
+
+//             // Desplazamos el vector 8 bytes para obtener las 4 i16 altas
+//             let high_half = _mm_srli_si128(chunk, 8);
+
+//             // Convertimos las 4 i16 altas a i32
+//             let high_i32 = _mm_cvtepi16_epi32(high_half);
+
+//             // Almacenamos temporalmente los resultados
+//             let mut temp = [0i32; 8];
+//             _mm_storeu_si128(temp.as_mut_ptr() as *mut __m128i, low_i32);
+//             _mm_storeu_si128(temp.as_mut_ptr().add(4) as *mut __m128i, high_i32);
+
+//             packets.extend_from_slice(&temp);
+//             i += 8;
+//         }
+
+//         // Resto sin SIMD
+//         for j in i..len {
+//             let start = j * 2;
+//             let end = start + 2;
+//             if end > self.buffer.len() {
+//                 break;
+//             }
+//             packets.push(i16_to_i32(&self.buffer[start..end]));
+//         }
+
+//         Some(Ok(packets))
+//     }
+// }
 
 #[inline(always)]
 pub fn u8_to_i32(byte: u8) -> i32 {
@@ -904,7 +1121,7 @@ mod tests {
         data.extend_from_slice(&(1u16.to_le_bytes()));
         let sr = 8000u32;
         data.extend_from_slice(&sr.to_le_bytes());
-        let br = sr * 1 * (16 / 8) as u32;
+        let br = sr * (16 / 8) as u32;
         data.extend_from_slice(&br.to_le_bytes());
         data.extend_from_slice(&(2u16.to_le_bytes()));
         data.extend_from_slice(&(16u16.to_le_bytes()));

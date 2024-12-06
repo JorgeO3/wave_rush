@@ -1,12 +1,8 @@
-use mimalloc::MiMalloc;
 use std::fs::File;
 use wave_rush::*;
 
 // TODO: Check if this is the best way to use the SourceStream
 // TODO: take a look at the `lib2.rs` file
-
-// #[global_allocator]
-// static GLOBAL: MiMalloc = MiMalloc;
 
 fn main() -> Result<()> {
     // let file = File::open("dulce_carita.wav")?;
@@ -20,7 +16,6 @@ fn main() -> Result<()> {
             let _ = packet.unwrap();
         }
     })();
-
     println!("Elapsed time: {:?}", time.elapsed());
 
     Ok(())
