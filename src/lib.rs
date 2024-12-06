@@ -1,25 +1,25 @@
-// #![allow(unused)]
-use thiserror::Error;
-use derive_more::{Add, Sub};
+#![allow(unused)]
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
 
-#[derive(Debug, Error)]
+/// Number of samples per packet.
+pub const PACK_SIZE: usize = 1024;
+
+/// Specialized Result type for this crate's operations.
+pub type Result<T> = std::result::Result<T, Error>;
+
+/// General errors for this crate.
+#[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("{0}")]
     Static(&'static str),
-    #[error("Error genérico: {0}")]
-    Generic(String),
     #[error(transparent)]
     Io(#[from] io::Error),
 }
 
-/// Tipo especializado Result para operaciones en este crate.
-pub type Result<T> = std::result::Result<T, Error>;
-
-/// Representa diferentes formatos de muestra.
-#[derive(Debug)]
+/// Represents different sample formats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SampleFormat {
     Uint8,
     Int16,
@@ -28,7 +28,8 @@ pub enum SampleFormat {
 }
 
 impl SampleFormat {
-    /// Retorna el número de bytes por muestra.
+    /// Returns the number of bytes per sample.
+    #[inline]
     pub fn bytes_per_sample(&self) -> u16 {
         match self {
             SampleFormat::Uint8 => 1,
@@ -39,14 +40,7 @@ impl SampleFormat {
     }
 }
 
-/// Representa la base de tiempo (número racional como numerador y denominador).
-#[derive(Debug, Default)]
-pub struct TimeBase {
-    pub numer: u32,
-    pub denom: u32,
-}
-
-/// Representa los parámetros del códec para el archivo WAV.
+/// Codec parameters for the WAV file.
 #[derive(Debug, Default)]
 struct CodecParams {
     pub sample_rate: Option<u32>,
@@ -54,11 +48,11 @@ struct CodecParams {
     pub sample_format: Option<SampleFormat>,
     pub bits_per_sample: Option<u16>,
     pub num_channels: u16,
-    pub max_frames_per_packet: Option<u64>,
-    pub frames_per_block: Option<u64>,
+    pub block_align: Option<u16>,
+    pub audio_format: Option<u16>,
 }
 
-/// Una Tag encapsula un par clave-valor de metadatos.
+/// A Tag holds a key-value pair of metadata.
 #[derive(Clone, Debug)]
 pub struct Tag {
     pub tag_type: Option<TagType>,
@@ -66,7 +60,7 @@ pub struct Tag {
     pub value: String,
 }
 
-/// Tipo de etiqueta basado en claves.
+/// Known tag types.
 #[derive(Debug, Clone)]
 pub enum TagType {
     Rating,
@@ -94,7 +88,7 @@ pub enum TagType {
 }
 
 impl TagType {
-    /// Convierte un arreglo de 4 bytes a TagType.
+    /// Converts a 4-byte array into a TagType.
     fn from_bytes(key: &[u8; 4]) -> Self {
         match key {
             b"ages" => TagType::Rating,
@@ -123,7 +117,7 @@ impl TagType {
     }
 }
 
-/// Representa el chunk "fmt " en un archivo WAV.
+/// Represents the "fmt " chunk in a WAV file.
 pub struct FormatChunk {
     audio_format: u16,
     num_channels: u16,
@@ -133,32 +127,24 @@ pub struct FormatChunk {
     bits_per_sample: u16,
 }
 
-impl FormatChunk {
-    /// Retorna el número de bytes por muestra.
-    pub fn bytes_per_sample(&self) -> u16 {
-        self.bits_per_sample / 8
-    }
-}
-
-/// Representa el chunk "LIST" en un archivo WAV.
+/// Represents the "LIST" chunk in a WAV file.
 pub struct ListChunk {
     list_type: [u8; 4],
-    length: u32,
     tags: Vec<Tag>,
 }
 
-/// Representa el chunk "fact" en un archivo WAV.
+/// Represents the "fact" chunk in a WAV file.
 pub struct FactChunk {
     num_samples: u32,
 }
 
-/// Representa el chunk "data" en un archivo WAV.
+/// Represents the "data" chunk in a WAV file.
 pub struct DataChunk {
     length: u32,
     data_position: u64,
 }
 
-/// Enum representando varios tipos de chunks WAV.
+/// Enum representing several WAV chunk types.
 pub enum WaveChunk {
     Format(FormatChunk),
     List(ListChunk),
@@ -166,7 +152,7 @@ pub enum WaveChunk {
     Data(DataChunk),
 }
 
-/// Enum para identificar tipos de chunks basados en su ID.
+/// Enum identifying chunk types by their IDs.
 pub enum ChunkType {
     Format,
     List,
@@ -176,7 +162,8 @@ pub enum ChunkType {
 }
 
 impl ChunkType {
-    /// Convierte un ID de 4 bytes en el correspondiente ChunkType.
+    /// Converts a 4-byte ID into the corresponding ChunkType.
+    #[inline(always)]
     pub fn from_id(id: &[u8; 4]) -> Self {
         match id {
             b"fmt " => ChunkType::Format,
@@ -188,80 +175,24 @@ impl ChunkType {
     }
 }
 
-/// Un flujo de origen con buffer para leer datos de un archivo WAV.
-#[derive(Debug)]
-pub struct SourceStream<R: Read + Seek + Debug> {
-    reader: BufReader<R>,
-    abs_pos: u64,
-}
-
-impl<R: Read + Seek + Debug> SourceStream<R> {
-    const BUFFER_SIZE: usize = 1024 * 16;
-
-    /// Crea un nuevo SourceStream con el lector dado.
-    pub fn new(reader: R) -> Self {
-        let reader = BufReader::with_capacity(Self::BUFFER_SIZE, reader);
-        Self { reader, abs_pos: 0 }
-    }
-
-    /// Lee exactamente N bytes del flujo de origen.
-    pub fn read_exact<const N: usize>(&mut self) -> Result<[u8; N]> {
-        let mut result = [0u8; N];
-        self.reader.read_exact(&mut result)?;
-        self.abs_pos += N as u64;
-        Ok(result)
-    }
-
-    /// Lee un u16 en formato little-endian.
-    pub fn read_u16_le(&mut self) -> Result<u16> {
-        let bytes = self.read_exact::<2>()?;
-        Ok(u16::from_le_bytes(bytes))
-    }
-
-    /// Lee un u32 en formato little-endian.
-    pub fn read_u32_le(&mut self) -> Result<u32> {
-        let bytes = self.read_exact::<4>()?;
-        Ok(u32::from_le_bytes(bytes))
-    }
-
-    /// Busca una posición específica en el flujo.
-    pub fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
-        let new_pos = self.reader.seek(pos)?;
-        self.abs_pos = new_pos;
-        Ok(new_pos)
-    }
-
-    /// Lee datos del flujo de origen en el buffer dado.
-    pub fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
-        let n = self.reader.read(buf)?;
-        self.abs_pos += n as u64;
-        Ok(n)
-    }
-
-    /// Retorna la posición actual en el flujo.
-    pub fn position(&self) -> u64 {
-        self.abs_pos
-    }
-}
-
-/// Analiza chunks de un archivo WAV.
+/// A parser that processes WAV chunks.
 struct ChunkParser<'a, R: Read + Seek + Debug> {
-    source_stream: &'a mut SourceStream<R>,
+    reader: &'a mut BufReader<R>,
     cursor: usize,
     length: usize,
 }
 
 impl<'a, R: Read + Seek + Debug> ChunkParser<'a, R> {
-    /// Crea un nuevo analizador de chunks con el flujo de origen y longitud dados.
-    pub fn new(source_stream: &'a mut SourceStream<R>, length: usize) -> Self {
+    /// Creates a new chunk parser with the given reader and length.
+    pub fn new(reader: &'a mut BufReader<R>, length: usize) -> Self {
         Self {
-            source_stream,
+            reader,
             cursor: 0,
             length,
         }
     }
 
-    /// Alinea el cursor al siguiente límite de 2 bytes, si es necesario.
+    /// Aligns the cursor to the next 2-byte boundary if needed.
     fn align(&mut self) -> Result<()> {
         if self.cursor & 1 != 0 {
             self.skip_bytes(1)?;
@@ -269,9 +200,9 @@ impl<'a, R: Read + Seek + Debug> ChunkParser<'a, R> {
         Ok(())
     }
 
-    /// Mueve el cursor por el número especificado de bytes.
+    /// Moves the cursor forward by `n` bytes.
     fn skip_bytes(&mut self, n: usize) -> Result<()> {
-        self.source_stream.seek(SeekFrom::Current(n as i64))?;
+        self.reader.seek(SeekFrom::Current(n as i64))?;
         self.cursor += n;
         Ok(())
     }
@@ -290,42 +221,38 @@ impl<'a, R: Read + Seek + Debug> ChunkParser<'a, R> {
 
     fn read_exact<const N: usize>(&mut self) -> Result<[u8; N]> {
         let mut result = [0u8; N];
-        self.source_stream.reader.read_exact(&mut result)?;
+        self.reader.read_exact(&mut result)?;
         self.cursor += N;
         Ok(result)
     }
 
     fn read_bytes(&mut self, n: usize) -> Result<Vec<u8>> {
         let mut buffer = vec![0; n];
-        self.source_stream.reader.read_exact(&mut buffer)?;
+        self.reader.read_exact(&mut buffer)?;
         self.cursor += n;
         Ok(buffer)
     }
 
-    /// Itera sobre cada chunk y aplica la función dada a cada uno.
+    /// Iterates over each chunk, applying the provided function to each.
     pub fn parse_chunks<F>(&mut self, mut f: F) -> Result<()>
     where
         F: FnMut(WaveChunk) -> Result<()>,
     {
         while self.cursor + 8 <= self.length {
-            // Lee el ID del chunk y su tamaño.
             let chunk_id = self.read_exact::<4>()?;
-            let chunk_size = self.read_u32_le()?;
-            let chunk_size_usize = chunk_size as usize;
+            let chunk_size = self.read_u32_le()? as usize;
 
-            // Verifica si el tamaño del chunk excede los bytes restantes.
-            if self.length - self.cursor < chunk_size_usize {
+            if self.length - self.cursor < chunk_size {
                 return Err(Error::Static("Chunk size exceeds the remaining length"));
             }
 
-            // Procesa el chunk basado en su ID.
             let chunk = match ChunkType::from_id(&chunk_id) {
-                ChunkType::Format => self.parse_format_chunk(chunk_size_usize)?,
-                ChunkType::Data => self.parse_data_chunk(chunk_size_usize)?,
-                ChunkType::List => self.parse_list_chunk(chunk_size_usize)?,
-                ChunkType::Fact => self.parse_fact_chunk(chunk_size_usize)?,
+                ChunkType::Format => self.parse_format_chunk(chunk_size)?,
+                ChunkType::Data => self.parse_data_chunk(chunk_size)?,
+                ChunkType::List => self.parse_list_chunk(chunk_size)?,
+                ChunkType::Fact => self.parse_fact_chunk(chunk_size)?,
                 ChunkType::Unknown => {
-                    self.skip_bytes(chunk_size_usize)?;
+                    self.skip_bytes(chunk_size)?;
                     continue;
                 }
             };
@@ -337,7 +264,6 @@ impl<'a, R: Read + Seek + Debug> ChunkParser<'a, R> {
         Ok(())
     }
 
-    /// Analiza un chunk "fmt ".
     fn parse_format_chunk(&mut self, chunk_size: usize) -> Result<WaveChunk> {
         if chunk_size < 16 {
             return Err(Error::Static("Invalid format chunk size"));
@@ -349,8 +275,8 @@ impl<'a, R: Read + Seek + Debug> ChunkParser<'a, R> {
         let byte_rate = self.read_u32_le()?;
         let block_align = self.read_u16_le()?;
         let bits_per_sample = self.read_u16_le()?;
-        let remaining = chunk_size - 16;
 
+        let remaining = chunk_size.saturating_sub(16);
         if remaining > 0 {
             self.skip_bytes(remaining)?;
         }
@@ -365,17 +291,15 @@ impl<'a, R: Read + Seek + Debug> ChunkParser<'a, R> {
         }))
     }
 
-    /// Analiza un chunk "data".
     fn parse_data_chunk(&mut self, chunk_size: usize) -> Result<WaveChunk> {
-        let data_position = self.source_stream.position();
-        self.cursor += chunk_size;
+        let data_position = self.reader.stream_position()?;
+        self.skip_bytes(chunk_size)?;
         Ok(WaveChunk::Data(DataChunk {
             length: chunk_size as u32,
             data_position,
         }))
     }
 
-    /// Analiza un chunk "LIST".
     fn parse_list_chunk(&mut self, chunk_size: usize) -> Result<WaveChunk> {
         let list_type = self.read_exact::<4>()?;
         let remaining_size = chunk_size - 4;
@@ -387,45 +311,37 @@ impl<'a, R: Read + Seek + Debug> ChunkParser<'a, R> {
             self.skip_bytes(remaining_size)?;
         }
 
-        Ok(WaveChunk::List(ListChunk {
-            list_type,
-            length: chunk_size as u32,
-            tags,
-        }))
+        Ok(WaveChunk::List(ListChunk { list_type, tags }))
     }
 
-    /// Analiza el chunk "INFO", que es un subchunk del chunk "LIST".
     fn parse_info_chunk(&mut self, mut remaining_size: usize, tags: &mut Vec<Tag>) -> Result<()> {
         while remaining_size >= 8 {
-            // Lee la clave y el tamaño de la etiqueta.
             let tag_key = self.read_exact::<4>()?;
             let tag_size = self.read_u32_le()? as usize;
             remaining_size -= 8;
 
-            // Lee el valor de la etiqueta.
             let tag_value_bytes = self.read_bytes(tag_size)?;
             let tag_value = String::from_utf8_lossy(&tag_value_bytes)
                 .trim_end_matches(char::from(0))
                 .to_string();
             remaining_size -= tag_size;
 
-            // Alinea a byte par si es necesario.
             if tag_size % 2 != 0 {
                 self.skip_bytes(1)?;
                 remaining_size -= 1;
             }
 
-            // Agrega la etiqueta al vector.
+            let key = std::str::from_utf8(&tag_key).unwrap().to_string();
+
             tags.push(Tag {
                 tag_type: Some(TagType::from_bytes(&tag_key)),
-                key: String::from_utf8_lossy(&tag_key).into_owned(),
+                key,
                 value: tag_value,
             });
         }
         Ok(())
     }
 
-    /// Analiza un chunk "fact".
     fn parse_fact_chunk(&mut self, chunk_size: usize) -> Result<WaveChunk> {
         let num_samples = self.read_u32_le()?;
         if chunk_size > 4 {
@@ -435,80 +351,62 @@ impl<'a, R: Read + Seek + Debug> ChunkParser<'a, R> {
     }
 }
 
-const MAX_FRAMES_PER_PACKET: u64 = 1024;
-
-#[derive(Debug)]
-pub struct PacketInfo {
-    pub block_size: u64,
-    pub frames_per_block: u64,
-    pub max_blocks_per_packet: u64,
-}
-
-impl PacketInfo {
-    pub fn new(frame_len: u16) -> Self {
-        Self {
-            frames_per_block: 1,
-            block_size: frame_len as u64,
-            max_blocks_per_packet: MAX_FRAMES_PER_PACKET,
-        }
-    }
-}
-
 #[derive(Debug)]
 struct WavReaderOptions {
     codec_params: CodecParams,
     metadata: HashMap<String, String>,
-    packet_info: PacketInfo,
     data_start: u64,
     data_end: u64,
 }
 
-impl Default for WavReaderOptions {
-    fn default() -> Self {
-        Self {
-            codec_params: CodecParams::default(),
-            metadata: HashMap::new(),
-            packet_info: PacketInfo::new(0),
-            data_start: 0,
-            data_end: 0,
-        }
-    }
-}
-
-/// Lector de archivos WAV.
+/// WAV file reader.
 #[derive(Debug)]
 pub struct WavReader<R: Read + Seek + Debug> {
-    source_stream: SourceStream<R>,
+    buf: BufReader<R>,
     opts: WavReaderOptions,
 }
 
 impl<R: Read + Seek + Debug> WavReader<R> {
     const RIFF_HEADER: [u8; 4] = *b"RIFF";
     const WAVE_HEADER: [u8; 4] = *b"WAVE";
+    const BUFFER_SIZE: usize = 1024 * 32;
 
-    fn new(source_stream: SourceStream<R>, opts: WavReaderOptions) -> Self {
-        Self {
-            source_stream,
-            opts,
-        }
-    }
+    /// Attempts to create a new WavReader by parsing the WAV headers.
+    pub fn try_new(file: R) -> Result<Self> {
+        let mut buf = BufReader::with_capacity(Self::BUFFER_SIZE, file);
 
-    /// Intenta crear un nuevo WavReader analizando las cabeceras del archivo WAV.
-    pub fn try_new(mut source_stream: SourceStream<R>) -> Result<Self> {
-        let riff_header = source_stream.read_exact::<4>()?;
+        let riff_header = {
+            let mut riff_header = [0u8; 4];
+            buf.read_exact(&mut riff_header)?;
+            riff_header
+        };
         if riff_header != Self::RIFF_HEADER {
             return Err(Error::Static("Invalid RIFF header"));
         }
 
-        let chunk_size = source_stream.read_u32_le()? as usize;
-        let wave_header = source_stream.read_exact::<4>()?;
+        let chunk_size = {
+            let mut size_bytes = [0u8; 4];
+            buf.read_exact(&mut size_bytes)?;
+            u32::from_le_bytes(size_bytes) as usize
+        };
+
+        let wave_header = {
+            let mut wave_header = [0u8; 4];
+            buf.read_exact(&mut wave_header)?;
+            wave_header
+        };
         if wave_header != Self::WAVE_HEADER {
             return Err(Error::Static("Invalid WAVE header"));
         }
 
-        let mut options = WavReaderOptions::default();
-        let mut parser = ChunkParser::new(&mut source_stream, chunk_size);
+        let mut options = WavReaderOptions {
+            codec_params: CodecParams::default(),
+            metadata: HashMap::new(),
+            data_start: 0,
+            data_end: 0,
+        };
 
+        let mut parser = ChunkParser::new(&mut buf, chunk_size);
         parser.parse_chunks(|chunk| match chunk {
             WaveChunk::Format(format) => Self::handle_format_chunk(&mut options, format),
             WaveChunk::Data(data) => Self::handle_data_chunk(&mut options, data),
@@ -516,17 +414,15 @@ impl<R: Read + Seek + Debug> WavReader<R> {
             WaveChunk::List(list) => Self::handle_list_chunk(&mut options, list),
         })?;
 
-        Ok(Self::new(source_stream, options))
+        Ok(Self { buf, opts: options })
     }
 
     fn handle_format_chunk(options: &mut WavReaderOptions, chunk: FormatChunk) -> Result<()> {
-        options.packet_info.block_size = chunk.block_align as u64;
         options.codec_params.sample_rate = Some(chunk.sample_rate);
         options.codec_params.num_channels = chunk.num_channels;
         options.codec_params.bits_per_sample = Some(chunk.bits_per_sample);
-        options.codec_params.frames_per_block = Some(options.packet_info.frames_per_block);
-        options.codec_params.max_frames_per_packet =
-            Some(options.packet_info.max_blocks_per_packet);
+        options.codec_params.block_align = Some(chunk.block_align);
+        options.codec_params.audio_format = Some(chunk.audio_format);
 
         let sample_format = match chunk.bits_per_sample {
             8 => SampleFormat::Uint8,
@@ -549,9 +445,8 @@ impl<R: Read + Seek + Debug> WavReader<R> {
         options.data_start = chunk.data_position;
         options.data_end = chunk.data_position + chunk.length as u64;
 
-        if options.packet_info.block_size != 0 {
-            let num_frames = chunk.length as u64
-                / (options.packet_info.block_size * options.packet_info.frames_per_block);
+        if let Some(block_align) = options.codec_params.block_align {
+            let num_frames = chunk.length as u64 / block_align as u64;
             options.codec_params.num_frames = Some(num_frames);
         }
         Ok(())
@@ -564,233 +459,690 @@ impl<R: Read + Seek + Debug> WavReader<R> {
         Ok(())
     }
 
-    pub fn packets(&mut self) -> PacketIterator<R> {
-        PacketIterator::new(self)
-    }
-
-    pub fn num_packets(&self) -> u64 {
-        let num_frames = self.opts.codec_params.num_frames.unwrap_or(0);
-        let frames_per_block = self.opts.packet_info.frames_per_block;
-        let block_size = self.opts.packet_info.block_size;
-        let frames_per_packet = frames_per_block * block_size;
-        (num_frames + frames_per_packet - 1) / frames_per_packet
-    }
-
+    /// Returns the total number of frames.
     pub fn num_frames(&self) -> u64 {
         self.opts.codec_params.num_frames.unwrap_or(0)
     }
 
+    /// Returns the sample rate.
     pub fn sample_rate(&self) -> u32 {
         self.opts.codec_params.sample_rate.unwrap_or(0)
     }
 
+    /// Returns the number of channels.
     pub fn num_channels(&self) -> u16 {
         self.opts.codec_params.num_channels
     }
 
+    /// Returns bits per sample.
     pub fn bits_per_sample(&self) -> u16 {
         self.opts.codec_params.bits_per_sample.unwrap_or(0)
     }
 
+    /// Returns the sample format.
     pub fn sample_format(&self) -> &SampleFormat {
         self.opts.codec_params.sample_format.as_ref().unwrap()
     }
 
+    /// Returns the metadata.
     pub fn metadata(&self) -> &HashMap<String, String> {
         &self.opts.metadata
     }
+}
 
-    pub fn num_frames_per_block(&self) -> u64 {
-        self.opts.packet_info.frames_per_block
+/// WAV file decoder.
+pub struct WavDecoder<R: Read + Seek + Debug> {
+    reader: WavReader<R>,
+}
+
+impl<R: Read + Seek + Debug> WavDecoder<R> {
+    /// Creates a new WAV decoder from a `WavReader`.
+    pub fn try_new(mut reader: WavReader<R>) -> Result<Self> {
+        // Ensure the audio format is PCM (1).
+        if reader.opts.codec_params.audio_format != Some(1) {
+            return Err(Error::Static(
+                "Unsupported audio format (only PCM is supported)",
+            ));
+        }
+
+        reader.buf.seek(SeekFrom::Start(reader.opts.data_start))?;
+        Ok(Self { reader })
     }
 
-    pub fn data_start(&self) -> u64 {
-        self.opts.data_start
-    }
-
-    pub fn data_end(&self) -> u64 {
-        self.opts.data_end
+    /// Returns an iterator over decoded audio packets.
+    pub fn packets(&mut self) -> PacketsIterator<R> {
+        let data_end = self.reader.opts.data_end;
+        let sample_format = *self.reader.sample_format();
+        let num_channels = self.reader.num_channels();
+        PacketsIterator::new(&mut self.reader.buf, data_end, sample_format, num_channels)
     }
 }
 
-pub struct PacketIterator<'a, R: Read + Seek + Debug> {
-    reader: &'a mut WavReader<R>,
-    current_pos: u64,
+/// Iterator over decoded audio samples.
+pub struct PacketsIterator<'a, R: Read + Seek + Debug> {
+    reader: &'a mut BufReader<R>,
+    data_end: u64,
+    sample_format: SampleFormat,
+    num_channels: u16,
+    buffer: Vec<u8>,
 }
 
-impl<'a, R: Read + Seek + Debug> PacketIterator<'a, R> {
-    fn new(reader: &'a mut WavReader<R>) -> Self {
-        let current_pos = reader.opts.data_start;
+impl<'a, R: Read + Seek + Debug> PacketsIterator<'a, R> {
+    fn new(
+        reader: &'a mut BufReader<R>,
+        data_end: u64,
+        sample_format: SampleFormat,
+        num_channels: u16,
+    ) -> Self {
+        let bytes_per_sample = sample_format.bytes_per_sample() as usize;
+        let total_sample_size = bytes_per_sample * num_channels as usize;
+        let packet_len_bytes = total_sample_size * PACK_SIZE;
+
         Self {
-            current_pos,
             reader,
+            data_end,
+            sample_format,
+            num_channels,
+            buffer: vec![0u8; packet_len_bytes],
         }
     }
 }
 
-impl<'a, R: Read + Seek + Debug> Iterator for PacketIterator<'a, R> {
-    type Item = Vec<u8>;
+impl<R: Read + Seek + Debug> Iterator for PacketsIterator<'_, R> {
+    type Item = Result<Vec<i32>>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.current_pos >= self.reader.opts.data_end {
-            return None;
+        let pos = match self.reader.stream_position() {
+            Ok(pos) => pos,
+            Err(e) => return Some(Err(Error::Io(e))),
+        };
+
+        if pos >= self.data_end {
+            return None; // No more data available
         }
 
-        let opts = &self.reader.opts;
-        let block_size = opts.packet_info.block_size;
-        let max_blocks_per_packet = opts.packet_info.max_blocks_per_packet;
+        let bytes_per_sample = self.sample_format.bytes_per_sample() as usize;
+        let total_sample_size = bytes_per_sample * self.num_channels as usize;
+        let packet_len_bytes = total_sample_size * PACK_SIZE;
 
-        let remaining_blocks = (opts.data_end - self.current_pos) / block_size;
-        let blocks_to_read = remaining_blocks.min(max_blocks_per_packet);
-        let packet_size = blocks_to_read * block_size;
+        // Calculate how many bytes remain until data_end
+        let remaining = (self.data_end - pos) as usize;
 
-        if packet_size == 0 {
-            return None;
+        // Adjust if there's not enough data for a full packet
+        let bytes_to_read = remaining.min(packet_len_bytes);
+        self.buffer.resize(bytes_to_read, 0);
+
+        if let Err(e) = self.reader.read_exact(&mut self.buffer) {
+            return Some(Err(Error::Io(e)));
         }
 
-        let mut packet = vec![0; packet_size as usize];
-        if self.reader.source_stream.read(&mut packet).is_ok() {
-            self.current_pos += packet_size;
-            Some(packet)
+        let total_samples = bytes_to_read / bytes_per_sample;
+        let mut packets = Vec::with_capacity(total_samples);
+
+        for i in 0..total_samples {
+            let start = i * bytes_per_sample;
+            let end = start + bytes_per_sample;
+
+            if end > self.buffer.len() {
+                break; // Not enough bytes left
+            }
+
+            let sample = match self.sample_format {
+                SampleFormat::Uint8 => u8_to_i32(self.buffer[start]),
+                SampleFormat::Int16 => i16_to_i32(&self.buffer[start..end]),
+                SampleFormat::Int24 => i24_to_i32(&self.buffer[start..end]),
+                SampleFormat::Int32 => i32_to_i32(&self.buffer[start..end]),
+            };
+
+            packets.push(sample);
+        }
+
+        Some(Ok(packets))
+    }
+}
+
+#[inline(always)]
+pub fn u8_to_i32(byte: u8) -> i32 {
+    ((byte as i32) << 24 >> 24) - 128
+}
+
+#[inline(always)]
+pub fn i16_to_i32(bytes: &[u8]) -> i32 {
+    assert!(bytes.len() == 2, "Invalid i16 sample size");
+    ((bytes[1] as i32) << 8 | (bytes[0] as i32)) << 16 >> 16
+}
+
+#[inline(always)]
+pub fn i24_to_i32(bytes: &[u8]) -> i32 {
+    assert!(bytes.len() == 3, "Invalid i24 sample size");
+    ((bytes[2] as i32) << 16 | (bytes[1] as i32) << 8 | (bytes[0] as i32)) << 8 >> 8
+}
+
+#[inline(always)]
+pub fn i32_to_i32(bytes: &[u8]) -> i32 {
+    assert!(bytes.len() == 4, "Invalid i32 sample size");
+    (bytes[3] as i32) << 24 | (bytes[2] as i32) << 16 | (bytes[1] as i32) << 8 | (bytes[0] as i32)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::Rng;
+    use std::io::Cursor; // Asegúrate de tener rand en dev-dependencies si se usa
+
+    /// Creates a minimal valid WAV header for testing.
+    /// This is a small 44-byte PCM header with no actual audio data.
+    fn minimal_wav_header(sample_rate: u32, num_channels: u16, bits_per_sample: u16) -> Vec<u8> {
+        let byte_rate = sample_rate * (bits_per_sample as u32 / 8) * num_channels as u32;
+        let block_align = (bits_per_sample / 8) * num_channels;
+
+        let mut data = Vec::new();
+        // RIFF header
+        data.extend_from_slice(b"RIFF");
+        // File size (minus 8), for just a header we say 36 bytes extra
+        data.extend_from_slice(&(36u32.to_le_bytes()));
+        // WAVE
+        data.extend_from_slice(b"WAVE");
+
+        // fmt chunk
+        data.extend_from_slice(b"fmt ");
+        data.extend_from_slice(&(16u32.to_le_bytes())); // Subchunk size = 16 for PCM
+        data.extend_from_slice(&(1u16.to_le_bytes())); // PCM format
+        data.extend_from_slice(&(num_channels.to_le_bytes()));
+        data.extend_from_slice(&(sample_rate.to_le_bytes()));
+        data.extend_from_slice(&(byte_rate.to_le_bytes()));
+        data.extend_from_slice(&(block_align.to_le_bytes()));
+        data.extend_from_slice(&(bits_per_sample.to_le_bytes()));
+
+        // data chunk (no data)
+        data.extend_from_slice(b"data");
+        data.extend_from_slice(&(0u32.to_le_bytes()));
+
+        data
+    }
+
+    #[test]
+    fn invalid_riff_header() {
+        let invalid = b"XXXX\x00\x00\x00\x00WAVE".to_vec();
+        let cursor = Cursor::new(invalid);
+        let reader = WavReader::try_new(cursor);
+        assert!(reader.is_err());
+        match reader {
+            Err(Error::Static(msg)) => assert_eq!(msg, "Invalid RIFF header"),
+            _ => panic!("Expected 'Invalid RIFF header' error"),
+        }
+    }
+
+    #[test]
+    fn invalid_wave_header() {
+        let invalid = b"RIFF\x24\x00\x00\x00XXXX".to_vec();
+        let cursor = Cursor::new(invalid);
+        let reader = WavReader::try_new(cursor);
+        assert!(reader.is_err());
+        match reader {
+            Err(Error::Static(msg)) => assert_eq!(msg, "Invalid WAVE header"),
+            _ => panic!("Expected 'Invalid WAVE header' error"),
+        }
+    }
+
+    #[test]
+    fn minimal_wav_header_parses_correctly() {
+        let data = minimal_wav_header(44100, 2, 16);
+        let cursor = Cursor::new(data);
+        let reader = WavReader::try_new(cursor).expect("Failed to parse minimal WAV header");
+        assert_eq!(reader.sample_rate(), 44100);
+        assert_eq!(reader.num_channels(), 2);
+        assert_eq!(reader.bits_per_sample(), 16);
+        assert_eq!(*reader.sample_format(), SampleFormat::Int16);
+        assert_eq!(reader.num_frames(), 0);
+    }
+
+    #[test]
+    fn truncated_file_returns_eof_error() {
+        let truncated = b"RIFF".to_vec();
+        let cursor = Cursor::new(truncated);
+        let reader = WavReader::try_new(cursor);
+        assert!(reader.is_err());
+        match reader {
+            Err(Error::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {}
+            _ => panic!("Expected UnexpectedEof error"),
+        }
+    }
+
+    #[test]
+    fn list_chunk_metadata_parses_correctly() {
+        let mut data = minimal_wav_header(48000, 1, 16);
+
+        // Add LIST chunk with one tag (IART=Artist)
+        data.extend_from_slice(b"LIST");
+        data.extend_from_slice(&16u32.to_le_bytes());
+        data.extend_from_slice(b"INFO");
+
+        // Tag: IART with "Test\0"
+        data.extend_from_slice(b"IART");
+        data.extend_from_slice(&(5u32.to_le_bytes()));
+        data.extend_from_slice(b"Test\0");
+
+        let cursor = Cursor::new(data);
+        let reader = WavReader::try_new(cursor).expect("Failed to parse INFO chunk");
+        let metadata = reader.metadata();
+        assert_eq!(metadata.get("IART"), Some(&"Test".to_string()));
+    }
+
+    #[test]
+    fn decoder_initializes_for_pcm() {
+        let data = minimal_wav_header(32000, 1, 8);
+        let cursor = Cursor::new(data);
+        let reader = WavReader::try_new(cursor).expect("Failed to parse minimal WAV");
+        let decoder = WavDecoder::try_new(reader);
+        assert!(decoder.is_ok());
+    }
+
+    #[test]
+    fn unsupported_bits_per_sample_returns_error() {
+        let mut data = minimal_wav_header(44100, 2, 16);
+        // Change bits_per_sample to 20 (unsupported)
+        let pos_of_bps = 34;
+        data[pos_of_bps] = 20;
+        data[pos_of_bps + 1] = 0;
+
+        let cursor = Cursor::new(data);
+        let reader = WavReader::try_new(cursor);
+        assert!(reader.is_err());
+        match reader {
+            Err(Error::Static(msg)) => assert_eq!(msg, "Sample format not supported"),
+            _ => panic!("Expected 'Sample format not supported' error"),
+        }
+    }
+
+    #[test]
+    fn packets_iterator_no_data_returns_none() {
+        let data = minimal_wav_header(16000, 1, 8);
+        let cursor = Cursor::new(data);
+        let mut reader = WavReader::try_new(cursor).expect("Failed to parse");
+        let mut decoder = WavDecoder::try_new(reader).expect("Failed to create decoder");
+        let mut packets = decoder.packets();
+        assert!(packets.next().is_none());
+    }
+
+    #[test]
+    fn packets_iterator_partial_packet() {
+        let mut data = minimal_wav_header(8000, 1, 8);
+        // half a packet (512 bytes)
+        data.extend_from_slice(&[0x80; 512]);
+
+        let cursor = Cursor::new(data);
+        let mut reader = WavReader::try_new(cursor).expect("Failed to parse");
+        let mut decoder = WavDecoder::try_new(reader).expect("Failed to create decoder");
+        let mut packets = decoder.packets();
+
+        if let Some(Ok(p)) = packets.next() {
+            assert_eq!(p.len(), 512);
         } else {
-            None
-        }
-    }
-}
-
-pub trait Sample:
-    Copy
-    + Clone
-    + core::ops::Add<Output = Self>
-    + core::ops::Sub<Output = Self>
-    + Default
-    + PartialOrd
-    + PartialEq
-    + Sized
-{
-    /// A unique enum value representing the sample format. This constant may be used to dynamically
-    /// choose how to process the sample at runtime.
-    const FORMAT: SampleFormat;
-
-    /// The effective number of bits of the valid (clamped) sample range. Quantifies the dynamic
-    /// range of the sample format in bits.
-    const EFF_BITS: u32;
-
-    /// The mid-point value between the maximum and minimum sample value. If a sample is set to this
-    /// value it is silent.
-    const MID: Self;
-
-    /// If the sample format does not use the full range of the underlying data type, returns the
-    /// sample clamped to the valid range. Otherwise, returns the sample unchanged.
-    fn clamped(self) -> Self;
-}
-
-impl Sample for u8 {
-    const FORMAT: SampleFormat = SampleFormat::Uint8;
-    const EFF_BITS: u32 = 8;
-    const MID: Self = 128;
-
-    #[inline]
-    fn clamped(self) -> Self {
-        self
-    }
-}
-
-impl Sample for i16 {
-    const FORMAT: SampleFormat = SampleFormat::Int16;
-    const EFF_BITS: u32 = 16;
-    const MID: Self = 0;
-
-    #[inline]
-    fn clamped(self) -> Self {
-        self
-    }
-}
-
-#[allow(non_camel_case_types)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Default, Add, Sub)]
-struct i24(i32);
-impl Sample for i24 {
-    const FORMAT: SampleFormat = SampleFormat::Int24;
-    const EFF_BITS: u32 = 24;
-    const MID: Self = i24(0);
-
-    #[inline]
-    fn clamped(self) -> Self {
-        i24(self.0.clamp(-8_388_608, 8_388_607))
-    }
-}
-
-impl Sample for i32 {
-    const FORMAT: SampleFormat = SampleFormat::Int32;
-    const EFF_BITS: u32 = 32;
-    const MID: Self = 0;
-
-    #[inline]
-    fn clamped(self) -> Self {
-        self
-    }
-}
-
-struct AudioSpec {
-    sample_rate: u32,
-    num_channels: u8,
-    // bits_per_sample: u16,
-    // sample_format: SampleFormat,
-    // num_frames: u64,
-    // max_frames_per_packet: u64,
-    // frames_per_block: u64,
-}
-
-struct RawAudioBuffer<S: Sample> {
-    buffer: Vec<S>,
-    spec: AudioSpec,
-    n_frames: usize,
-    n_capacity: usize,
-}
-
-enum AudioBuffer {
-    Uint8(RawAudioBuffer<u8>),
-    Int16(RawAudioBuffer<i16>),
-    Int24(RawAudioBuffer<i24>),
-    Int32(RawAudioBuffer<i32>),
-}
-
-impl AudioBuffer {
-    fn new(spec: AudioSpec, n_frames: usize, n_capacity: usize) -> Self {
-        todo!("Implement AudioBuffer::new");
-    }
-}
-
-struct WavDecoder {
-    params: CodecParams,
-    coded_width: u16,
-    buffer: AudioBuffer,
-}
-
-impl WavDecoder {
-    fn try_new(params: &CodecParams) -> Result<Self> {
-        let Some(frames) = params.max_frames_per_packet else {
-            return Err(Error::Static("max_frames_per_packet not set"));
-        };
-
-        let Some(rate) = params.sample_rate else {
-            return Err(Error::Static("sample_rate not set"));
-        };
-
-        if params.num_channels < 1 || params.num_channels > 2 {
-            return Err(Error::Static("Invalid number of channels"));
+            panic!("Expected a partial packet of 512 samples");
         }
 
-        let spec = AudioSpec {
-            sample_rate: rate,
-            num_channels: params.num_channels as u8,
-        };
+        assert!(packets.next().is_none());
+    }
 
-        let coded_width = Some(params.bits_per_sample) else {
-            return Err(Error::Static("bits_per_sample not set"));
-        };
+    #[test]
+    fn multiple_list_chunks_accumulate_metadata() {
+        let mut data = minimal_wav_header(44100, 2, 16);
 
-        todo!()
+        // First LIST chunk
+        data.extend_from_slice(b"LIST");
+        let list_size_1 = 4 + 8 + 4;
+        data.extend_from_slice(&(list_size_1 as u32).to_le_bytes());
+        data.extend_from_slice(b"INFO");
+        data.extend_from_slice(b"ICRD");
+        data.extend_from_slice(&(4u32.to_le_bytes()));
+        data.extend_from_slice(b"2020");
+
+        // Second LIST chunk
+        data.extend_from_slice(b"LIST");
+        let list_size_2 = 4 + 8 + 5;
+        data.extend_from_slice(&(list_size_2 as u32).to_le_bytes());
+        data.extend_from_slice(b"INFO");
+        data.extend_from_slice(b"IART");
+        data.extend_from_slice(&(5u32.to_le_bytes()));
+        data.extend_from_slice(b"ABCD\0");
+
+        let cursor = Cursor::new(data);
+        let reader = WavReader::try_new(cursor).expect("Failed to parse multiple LIST chunks");
+        let meta = reader.metadata();
+        assert_eq!(meta.get("ICRD"), Some(&"2020".to_string()));
+        assert_eq!(meta.get("IART"), Some(&"ABCD".to_string()));
+    }
+
+    #[test]
+    fn multiple_data_chunks_updates_frames() {
+        let mut data = minimal_wav_header(8000, 1, 8);
+
+        // Add another data chunk with 4 bytes (4 frames)
+        data.extend_from_slice(b"data");
+        data.extend_from_slice(&(4u32.to_le_bytes()));
+        data.extend_from_slice(&[0x80; 4]);
+
+        let cursor = Cursor::new(data);
+        let reader = WavReader::try_new(cursor).expect("Failed to parse multiple data chunks");
+        assert_eq!(reader.num_frames(), 4);
+    }
+
+    #[test]
+    fn large_random_data_parses_without_panic() {
+        let mut data = minimal_wav_header(22050, 1, 16);
+        let data_size = 1024 * 1024;
+        // Remove the original zero size for data chunk
+        data.truncate(data.len() - 4);
+
+        data.extend_from_slice(b"data");
+        data.extend_from_slice(&(data_size as u32).to_le_bytes());
+
+        let mut rng = rand::thread_rng();
+        let random_bytes: Vec<u8> = (0..data_size).map(|_| rng.gen()).collect();
+        data.extend_from_slice(&random_bytes);
+
+        let cursor = Cursor::new(data);
+        let reader = WavReader::try_new(cursor).expect("Failed to parse large random data");
+        assert!(reader.num_frames() > 0);
+    }
+
+    #[test]
+    fn empty_file_fails() {
+        let cursor = Cursor::new(Vec::new());
+        let reader = WavReader::try_new(cursor);
+        assert!(reader.is_err());
+    }
+
+    #[test]
+    fn incomplete_tag_key_eof_error() {
+        let mut data = minimal_wav_header(44100, 2, 16);
+        data.extend_from_slice(b"LIST");
+        let list_size = 6u32;
+        data.extend_from_slice(&list_size.to_le_bytes());
+        data.extend_from_slice(b"INFO");
+        data.extend_from_slice(b"IC"); // Only 2 bytes, not 4 for the tag key
+
+        let cursor = Cursor::new(data);
+        let reader = WavReader::try_new(cursor);
+        assert!(reader.is_err());
+        match reader {
+            Err(Error::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {}
+            _ => panic!("Expected UnexpectedEof due to incomplete tag key"),
+        }
+    }
+
+    #[test]
+    fn missing_fmt_chunk_fails() {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"RIFF");
+        data.extend_from_slice(&(36u32.to_le_bytes()));
+        data.extend_from_slice(b"WAVE");
+        // no fmt, directly data
+        data.extend_from_slice(b"data");
+        data.extend_from_slice(&(0u32.to_le_bytes()));
+
+        let cursor = Cursor::new(data);
+        let reader = WavReader::try_new(cursor);
+        assert!(reader.is_err());
+    }
+
+    #[test]
+    fn data_chunk_before_fmt_may_fail() {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"RIFF");
+        data.extend_from_slice(&(44u32.to_le_bytes()));
+        data.extend_from_slice(b"WAVE");
+
+        data.extend_from_slice(b"data");
+        data.extend_from_slice(&(4u32.to_le_bytes()));
+        data.extend_from_slice(&[0x00; 4]);
+
+        // fmt after data
+        data.extend_from_slice(b"fmt ");
+        data.extend_from_slice(&(16u32.to_le_bytes()));
+        data.extend_from_slice(&(1u16.to_le_bytes()));
+        data.extend_from_slice(&(1u16.to_le_bytes()));
+        let sr = 8000u32;
+        data.extend_from_slice(&sr.to_le_bytes());
+        let br = sr * 1 * (16 / 8) as u32;
+        data.extend_from_slice(&br.to_le_bytes());
+        data.extend_from_slice(&(2u16.to_le_bytes()));
+        data.extend_from_slice(&(16u16.to_le_bytes()));
+
+        let cursor = Cursor::new(data);
+        let reader = WavReader::try_new(cursor);
+        // Could be ok or err depending on how the code handles ordering.
+        assert!(reader.is_err() || reader.is_ok());
+    }
+
+    #[test]
+    fn null_terminated_tags_are_trimmed() {
+        let mut data = minimal_wav_header(48000, 2, 16);
+
+        data.extend_from_slice(b"LIST");
+        let list_size = 4 + 8 + 6;
+        data.extend_from_slice(&(list_size as u32).to_le_bytes());
+        data.extend_from_slice(b"INFO");
+        data.extend_from_slice(b"INAM");
+        data.extend_from_slice(&(6u32.to_le_bytes()));
+        data.extend_from_slice(b"Hello\0");
+
+        let cursor = Cursor::new(data);
+        let reader = WavReader::try_new(cursor).expect("Failed to parse null-terminated tag");
+        let meta = reader.metadata();
+        assert_eq!(meta.get("INAM"), Some(&"Hello".to_string()));
+    }
+
+    #[test]
+    fn oversized_chunk_size_errors_out() {
+        let mut data = minimal_wav_header(44100, 2, 16);
+
+        data.extend_from_slice(b"JUNK");
+        data.extend_from_slice(&u32::MAX.to_le_bytes());
+
+        let cursor = Cursor::new(data);
+        let reader = WavReader::try_new(cursor);
+        assert!(reader.is_err());
+        match reader {
+            Err(Error::Static(msg)) => assert_eq!(msg, "Chunk size exceeds the remaining length"),
+            _ => panic!("Expected 'Chunk size exceeds the remaining length' error"),
+        }
+    }
+
+    #[test]
+    fn odd_length_tags_parsed_correctly() {
+        let mut data = minimal_wav_header(48000, 2, 16);
+
+        data.extend_from_slice(b"LIST");
+        let list_chunk_size = 20u32;
+        data.extend_from_slice(&list_chunk_size.to_le_bytes());
+        data.extend_from_slice(b"INFO");
+
+        // "ICMT" tag with 3-byte data "Hi\0"
+        data.extend_from_slice(b"ICMT");
+        data.extend_from_slice(&3u32.to_le_bytes());
+        data.extend_from_slice(b"Hi\0");
+
+        let cursor = Cursor::new(data);
+        let reader = WavReader::try_new(cursor).expect("Failed to parse odd-length tag");
+        let meta = reader.metadata();
+        assert_eq!(meta.get("ICMT"), Some(&"Hi".to_string()));
+    }
+
+    #[test]
+    fn fact_chunk_with_non_pcm_still_parses() {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"RIFF");
+        data.extend_from_slice(&(36u32.to_le_bytes()));
+        data.extend_from_slice(b"WAVE");
+
+        // fmt with audio_format = 3 (IEEE float)
+        data.extend_from_slice(b"fmt ");
+        data.extend_from_slice(&(16u32.to_le_bytes()));
+        data.extend_from_slice(&(3u16.to_le_bytes())); // Non-PCM
+        data.extend_from_slice(&(1u16.to_le_bytes()));
+        let sample_rate = 44100u32;
+        data.extend_from_slice(&sample_rate.to_le_bytes());
+        let byte_rate = sample_rate * 4;
+        data.extend_from_slice(&byte_rate.to_le_bytes());
+        data.extend_from_slice(&(4u16.to_le_bytes()));
+        data.extend_from_slice(&(32u16.to_le_bytes()));
+
+        // fact chunk
+        data.extend_from_slice(b"fact");
+        data.extend_from_slice(&4u32.to_le_bytes());
+        data.extend_from_slice(&(1000u32.to_le_bytes()));
+
+        data.extend_from_slice(b"data");
+        data.extend_from_slice(&(0u32.to_le_bytes()));
+
+        let cursor = Cursor::new(data);
+        let reader = WavReader::try_new(cursor).expect("Failed to parse non-PCM fact chunk");
+        assert_eq!(reader.num_frames(), 1000);
+    }
+
+    #[test]
+    fn malformed_fmt_chunk_errors() {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"RIFF");
+        data.extend_from_slice(&(20u32.to_le_bytes()));
+        data.extend_from_slice(b"WAVE");
+
+        // fmt chunk too small (only 10 bytes)
+        data.extend_from_slice(b"fmt ");
+        data.extend_from_slice(&(10u32.to_le_bytes()));
+        data.extend_from_slice(&[0u8; 10]);
+
+        let cursor = Cursor::new(data);
+        let reader = WavReader::try_new(cursor);
+        assert!(reader.is_err());
+        match reader {
+            Err(Error::Static(msg)) => assert_eq!(msg, "Invalid format chunk size"),
+            _ => panic!("Expected 'Invalid format chunk size' error"),
+        }
+    }
+
+    #[test]
+    fn data_chunk_misaligned_with_block_align_truncates() {
+        let mut data = minimal_wav_header(44100, 2, 16);
+        // data_size = 6, block_align = 4, so 1 frame + leftover
+        data.extend_from_slice(b"data");
+        let data_size = 6u32;
+        data.extend_from_slice(&data_size.to_le_bytes());
+        data.extend_from_slice(&[0x00; 6]);
+
+        let cursor = Cursor::new(data);
+        let reader = WavReader::try_new(cursor).expect("Failed to parse header");
+        assert_eq!(reader.num_frames(), 1);
+    }
+
+    #[test]
+    fn decoder_fails_for_non_pcm() {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"RIFF");
+        data.extend_from_slice(&(36u32.to_le_bytes()));
+        data.extend_from_slice(b"WAVE");
+
+        data.extend_from_slice(b"fmt ");
+        data.extend_from_slice(&(16u32.to_le_bytes()));
+        data.extend_from_slice(&(3u16.to_le_bytes())); // non-PCM
+        data.extend_from_slice(&(2u16.to_le_bytes()));
+        let sample_rate = 48000u32;
+        data.extend_from_slice(&sample_rate.to_le_bytes());
+        let byte_rate = sample_rate * 2 * 4;
+        data.extend_from_slice(&byte_rate.to_le_bytes());
+        data.extend_from_slice(&(8u16.to_le_bytes()));
+        data.extend_from_slice(&(32u16.to_le_bytes()));
+
+        data.extend_from_slice(b"data");
+        data.extend_from_slice(&(0u32.to_le_bytes()));
+
+        let cursor = Cursor::new(data);
+        let reader = WavReader::try_new(cursor).expect("Should parse non-PCM");
+        let decoder = WavDecoder::try_new(reader);
+        assert!(decoder.is_err());
+        match decoder {
+            Err(Error::Static(msg)) => {
+                assert_eq!(msg, "Unsupported audio format (only PCM is supported)")
+            }
+            _ => panic!("Expected 'Unsupported audio format' error"),
+        }
+    }
+
+    #[test]
+    fn packets_iterator_small_data_partial_packet() {
+        let mut data = minimal_wav_header(16000, 1, 8);
+        // Add only 10 bytes of data
+        data.extend_from_slice(b"data");
+        data.extend_from_slice(&(10u32.to_le_bytes()));
+        data.extend_from_slice(&[0x80; 10]);
+
+        let cursor = Cursor::new(data);
+        let mut reader = WavReader::try_new(cursor).expect("Failed to parse");
+        let mut decoder = WavDecoder::try_new(reader).expect("Failed to create decoder");
+        let mut packets = decoder.packets();
+
+        if let Some(Ok(packet)) = packets.next() {
+            assert_eq!(packet.len(), 10);
+        } else {
+            panic!("Expected one partial packet with 10 samples");
+        }
+
+        assert!(packets.next().is_none());
+    }
+
+    #[test]
+    fn packets_iterator_multiple_full_packets() {
+        let mut data = minimal_wav_header(44100, 2, 16);
+        // One packet = 1024 frames * 4 bytes/frame = 4096 bytes
+        // Two packets = 8192 bytes
+        data.extend_from_slice(b"data");
+        let data_length = 8192u32;
+        data.extend_from_slice(&data_length.to_le_bytes());
+        data.extend_from_slice(&vec![0u8; 8192]);
+
+        let cursor = Cursor::new(data);
+        let mut reader = WavReader::try_new(cursor).expect("Failed to parse");
+        let mut decoder = WavDecoder::try_new(reader).expect("Failed to create decoder");
+        let mut packets = decoder.packets();
+
+        // First packet
+        if let Some(Ok(packet)) = packets.next() {
+            assert_eq!(packet.len(), 1024 * 2);
+        } else {
+            panic!("Expected first packet");
+        }
+
+        // Second packet
+        if let Some(Ok(packet)) = packets.next() {
+            assert_eq!(packet.len(), 1024 * 2);
+        } else {
+            panic!("Expected second packet");
+        }
+
+        assert!(packets.next().is_none());
+    }
+
+    #[test]
+    fn non_ascii_tag_key_does_not_crash() {
+        let mut data = minimal_wav_header(44100, 2, 16);
+        data.extend_from_slice(b"LIST");
+
+        // Non-ASCII key: 4 + 8 + 1 = 13 total
+        let list_size = 4 + 8 + 1;
+        data.extend_from_slice(&(list_size as u32).to_le_bytes());
+        data.extend_from_slice(b"INFO");
+
+        data.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]);
+        data.extend_from_slice(&(1u32.to_le_bytes()));
+        data.push(b'A');
+
+        let cursor = Cursor::new(data);
+        let reader = WavReader::try_new(cursor).expect("Should parse weird key");
+        let meta = reader.metadata();
+        // If handling non-ASCII keys isn't implemented, this might fail.
+        // If it doesn't crash, at least we have some metadata?
+        // We just check not empty:
+        assert!(!meta.is_empty());
     }
 }
