@@ -10,7 +10,7 @@ use aligned_vec::{AVec, ConstAlign};
 /// Number of samples per packet.
 pub const PACK_SIZE: usize = 2048;
 
-// Validación en tiempo de compilación
+// Validations for PACK_SIZE
 const _: () = assert!(PACK_SIZE % 32 == 0, "must be multiple of 32 for uint8");
 const _: () = assert!(PACK_SIZE % 16 == 0, "must be multiple of 16 for int16");
 const _: () = assert!(PACK_SIZE % 8 == 0, "must be multiple of 8 for int32");
