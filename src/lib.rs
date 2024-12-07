@@ -10,6 +10,11 @@ use aligned_vec::{AVec, ConstAlign};
 /// Number of samples per packet.
 pub const PACK_SIZE: usize = 2048;
 
+// Validación en tiempo de compilación
+const _: () = assert!(PACK_SIZE % 32 == 0, "must be multiple of 32 for uint8");
+const _: () = assert!(PACK_SIZE % 16 == 0, "must be multiple of 16 for int16");
+const _: () = assert!(PACK_SIZE % 8 == 0, "must be multiple of 8 for int32");
+
 /// Specialized Result type for this crate's operations.
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -339,9 +344,9 @@ impl<'a, R: Read + Seek + Debug> ChunkParser<'a, R> {
             }
 
             let key = std::str::from_utf8(&tag_key)?.to_string();
-
+            let tag_type = TagType::from_bytes(&tag_key).into();
             tags.push(Tag {
-                tag_type: Some(TagType::from_bytes(&tag_key)),
+                tag_type,
                 key,
                 value: tag_value,
             });
@@ -531,7 +536,7 @@ pub struct PacketsIterator<'a, R: Read + Seek + Debug> {
     data_end: u64,
     sample_format: SampleFormat,
     num_channels: u16,
-    buffer: AVec<u8, ConstAlign<32>>, // alineado a 32 bytes para AVX2
+    buffer: AVec<u8>, // alineado a 32 bytes para AVX2
     bytes_per_sample: usize,
     total_sample_size: usize,
     packet_len_bytes: usize,
@@ -548,8 +553,10 @@ impl<'a, R: Read + Seek + Debug> PacketsIterator<'a, R> {
         let total_sample_size = bytes_per_sample * num_channels as usize;
         let packet_len_bytes = total_sample_size * PACK_SIZE;
 
+        let max_align = std::mem::align_of::<__m256i>();
+
         // Crea el AVec con alineación de 32 bytes
-        let mut buffer = AVec::<u8, ConstAlign<32>>::with_capacity(32, packet_len_bytes);
+        let mut buffer = AVec::with_capacity(max_align, packet_len_bytes);
         buffer.resize(packet_len_bytes, 0);
 
         Self {
@@ -565,10 +572,14 @@ impl<'a, R: Read + Seek + Debug> PacketsIterator<'a, R> {
     }
 }
 
+// TODO: Implement the streaming iterator crate.
+// This will allow us to avoid the overhead of creating a Vec for each packet.
 impl<R: Read + Seek + Debug> Iterator for PacketsIterator<'_, R> {
     type Item = Result<Vec<i32>>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        // FIXME: This function call is to expensive, we should avoid it.
+        // TODO: Implement a manual buffer management to avoid this call.
         let pos = match self.reader.stream_position() {
             Ok(pos) => pos,
             Err(e) => return Some(Err(Error::Io(e))),
@@ -684,6 +695,8 @@ unsafe fn decode_uint8_avx2(buffer: &[u8], total_samples: usize) -> Vec<i32> {
 unsafe fn decode_int16_avx2(buffer: &[u8], total_samples: usize) -> Vec<i32> {
     // Con AVX2, procesamos 16 i16 (32 bytes) a la vez.
     // let mut packets = vec![0; total_samples];
+    // FIXME: This vector is unaligned, we need to use an aligned vector for AVX2.
+    // TODO: Use aligned_vec crate to create an aligned vector.
     let mut packets: Vec<i32> = Vec::with_capacity(total_samples);
 
     let mut i = 0;
