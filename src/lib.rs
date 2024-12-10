@@ -8,7 +8,7 @@ use std::mem::MaybeUninit;
 use aligned_vec::{AVec, ConstAlign};
 
 /// Number of samples per packet.
-pub const PACK_SIZE: usize = 2048;
+pub const PACK_SIZE: usize = 1024 * 8;
 
 // Validations for PACK_SIZE
 const _: () = assert!(PACK_SIZE % 32 == 0, "must be multiple of 32 for uint8");
@@ -572,7 +572,12 @@ impl<'a, R: Read + Seek + Debug> PacketsIterator<'a, R> {
     }
 }
 
-// TODO: Implement the streaming iterator crate.
+// TODO: Refactor this function to avoid resizing the buffer.
+// TODO: Implement a streaming iterator to avoid creating a Vec for each packet.
+// TODO: Implement a SIMD decoder for each sample format.
+// TODO: Refactor this function for readability and performance.
+// TODO: Check if this is fastest than the previous implementation
+// TODO: (https://www.intel.com/content/www/us/en/docs/ipp/developer-guide-reference/2022-0/convert-001.html).
 // This will allow us to avoid the overhead of creating a Vec for each packet.
 impl<R: Read + Seek + Debug> Iterator for PacketsIterator<'_, R> {
     type Item = Result<Vec<i32>>;
@@ -592,7 +597,7 @@ impl<R: Read + Seek + Debug> Iterator for PacketsIterator<'_, R> {
         // Ya no calculamos bytes_per_sample, total_sample_size, packet_len_bytes aquí, ya los tenemos.
         let remaining = (self.data_end - pos) as usize;
         let bytes_to_read = remaining.min(self.packet_len_bytes);
-        self.buffer.resize(bytes_to_read, 0);
+        self.buffer.resize(bytes_to_read, 0); // FIXME: This is expensive
 
         if let Err(e) = self.reader.read_exact(&mut self.buffer) {
             return Some(Err(Error::Io(e)));
@@ -692,9 +697,9 @@ unsafe fn decode_uint8_avx2(buffer: &[u8], total_samples: usize) -> Vec<i32> {
 }
 
 #[target_feature(enable = "avx2")]
+#[inline(never)]
 unsafe fn decode_int16_avx2(buffer: &[u8], total_samples: usize) -> Vec<i32> {
     // Con AVX2, procesamos 16 i16 (32 bytes) a la vez.
-    // let mut packets = vec![0; total_samples];
     // FIXME: This vector is unaligned, we need to use an aligned vector for AVX2.
     // TODO: Use aligned_vec crate to create an aligned vector.
     let mut packets: Vec<i32> = Vec::with_capacity(total_samples);
