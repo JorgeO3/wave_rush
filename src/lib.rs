@@ -3,9 +3,8 @@ use std::arch::x86_64::*;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
-use std::mem::MaybeUninit;
 
-use aligned_vec::{AVec, ConstAlign};
+use aligned_vec::AVec;
 
 /// Number of samples per packet.
 pub const PACK_SIZE: usize = 1024 * 8;
@@ -553,7 +552,7 @@ impl<'a, R: Read + Seek + Debug> PacketsIterator<'a, R> {
         let total_sample_size = bytes_per_sample * num_channels as usize;
         let packet_len_bytes = total_sample_size * PACK_SIZE;
 
-        let max_align = std::mem::align_of::<__m256i>();
+        let max_align = align_of::<__m256i>();
 
         // Crea el AVec con alineación de 32 bytes
         let mut buffer = AVec::with_capacity(max_align, packet_len_bytes);
@@ -561,10 +560,10 @@ impl<'a, R: Read + Seek + Debug> PacketsIterator<'a, R> {
 
         Self {
             reader,
+            buffer,
             data_end,
             sample_format,
             num_channels,
-            buffer,
             bytes_per_sample,
             total_sample_size,
             packet_len_bytes,
@@ -578,6 +577,7 @@ impl<'a, R: Read + Seek + Debug> PacketsIterator<'a, R> {
 // TODO: Refactor this function for readability and performance.
 // TODO: Check if this is fastest than the previous implementation
 // TODO: (https://www.intel.com/content/www/us/en/docs/ipp/developer-guide-reference/2022-0/convert-001.html).
+// TODO: Check if Box<[i32]> is faster than Vec<i32> for this use case.
 // This will allow us to avoid the overhead of creating a Vec for each packet.
 impl<R: Read + Seek + Debug> Iterator for PacketsIterator<'_, R> {
     type Item = Result<Vec<i32>>;

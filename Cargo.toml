@@ -3,10 +3,13 @@ name = "wave_rush"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "wave_rushlib"
+
+
 [dependencies]
 aligned-vec = "0.6.1"
 thiserror = "2.0.6"
-
 
 [dev-dependencies]
 rand = "0.8.5"
@@ -15,3 +18,4 @@ rand = "0.8.5"
 codegen-units = 1
 lto = true
 opt-level = 3
+debug = true
