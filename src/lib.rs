@@ -1,10 +1,14 @@
 #![allow(unused)]
 use std::arch::x86_64::*;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
 
-use aligned_vec::AVec;
+use aligned_vec::{AVec, ConstAlign};
+use fallible_streaming_iterator::FallibleStreamingIterator;
+
+mod avec;
 
 /// Number of samples per packet.
 pub const PACK_SIZE: usize = 1024 * 8;
@@ -556,6 +560,8 @@ impl<'a, R: Read + Seek + Debug> PacketsIterator<'a, R> {
 
         // Crea el AVec con alineación de 32 bytes
         let mut buffer = AVec::with_capacity(max_align, packet_len_bytes);
+        let mut buffer2 = aligned_vec!(packet_len_bytes, 32);
+
         buffer.resize(packet_len_bytes, 0);
 
         Self {
@@ -645,14 +651,67 @@ impl<R: Read + Seek + Debug> Iterator for PacketsIterator<'_, R> {
     }
 }
 
+struct FailliblePacketsIterator<'a, R: Read + Seek + Debug> {
+    reader: &'a mut BufReader<R>,
+    data_end: u64,
+    sample_format: SampleFormat,
+    num_channels: u16,
+    buffer: AVec<u8>, // alineado a 32 bytes para AVX2
+    bytes_per_sample: usize,
+    total_sample_size: usize,
+    packet_len_bytes: usize,
+}
+
+impl<'a, R: Read + Seek + Debug> FailliblePacketsIterator<'a, R> {
+    fn new(
+        reader: &'a mut BufReader<R>,
+        data_end: u64,
+        sample_format: SampleFormat,
+        num_channels: u16,
+    ) -> Self {
+        let bytes_per_sample = sample_format.bytes_per_sample() as usize;
+        let total_sample_size = bytes_per_sample * num_channels as usize;
+        let packet_len_bytes = total_sample_size * PACK_SIZE;
+
+        let max_align = align_of::<__m256i>();
+
+        // Crea el AVec con alineación de 32 bytes
+        let mut buffer = AVec::with_capacity(max_align, packet_len_bytes);
+        buffer.resize(packet_len_bytes, 0);
+
+        Self {
+            reader,
+            buffer,
+            data_end,
+            sample_format,
+            num_channels,
+            bytes_per_sample,
+            total_sample_size,
+            packet_len_bytes,
+        }
+    }
+}
+
+// impl<'a, R: Read + Seek + Debug> FallibleStreamingIterator for FailliblePacketsIterator<'a, R> {
+//     type Item = Cow<'a, [i32]>;
+//     type Error = Error;
+
+//     fn advance(&mut self) -> std::result::Result<(), Error> {
+//         Ok(())
+//     }
+
+//     fn get(&self) -> Option<&Self::Item> {}
+// }
+
 #[target_feature(enable = "avx2")]
 unsafe fn decode_uint8_avx2(buffer: &[u8], total_samples: usize) -> Vec<i32> {
     let mut packets: Vec<i32> = Vec::with_capacity(total_samples);
-    let mut i = 0;
-
-    let offset = _mm256_set1_epi8(128u8 as i8);
+    unsafe { packets.set_len(total_samples) };
 
     let mut out_ptr = packets.as_mut_ptr();
+    let offset = _mm256_set1_epi8(128u8 as i8);
+
+    let mut i = 0;
     while i + 32 <= total_samples {
         let ptr = buffer.as_ptr().add(i) as *const __m256i;
         let chunk = _mm256_loadu_si256(ptr);
@@ -696,42 +755,153 @@ unsafe fn decode_uint8_avx2(buffer: &[u8], total_samples: usize) -> Vec<i32> {
     packets
 }
 
+macro_rules! aligned_vec {
+    ($size:expr, $align:expr) => {{
+        let size = $size;
+        let layout = Layout::from_size_align(size, $align).unwrap();
+
+        let aligned_ptr = unsafe { alloc(layout) };
+        if aligned_ptr.is_null() {
+            std::alloc::handle_alloc_error(layout)
+        }
+
+        unsafe { Vec::from_raw_parts(aligned_ptr as *mut _, size, size) }
+    }};
+}
+
+use std::alloc::{alloc, Layout};
+
 #[target_feature(enable = "avx2")]
-#[inline(never)]
 unsafe fn decode_int16_avx2(buffer: &[u8], total_samples: usize) -> Vec<i32> {
-    // Con AVX2, procesamos 16 i16 (32 bytes) a la vez.
-    // FIXME: This vector is unaligned, we need to use an aligned vector for AVX2.
-    // TODO: Use aligned_vec crate to create an aligned vector.
-    let mut packets: Vec<i32> = Vec::with_capacity(total_samples);
+    // Calcular el layout para alineación de 32 bytes
+    let size = std::mem::size_of::<i32>() * total_samples;
+    let layout = Layout::from_size_align(size, 32).unwrap();
+
+    // Allocar memoria alineada
+    let aligned_ptr = alloc(layout) as *mut i32;
+    if aligned_ptr.is_null() {
+        std::alloc::handle_alloc_error(layout)
+    };
 
     let mut i = 0;
-    let mut out_ptr = packets.as_mut_ptr(); // puntero a i32 en packets
-    while i + 16 <= total_samples {
-        let ptr = buffer.as_ptr().add(i * 2) as *const __m256i;
-        let chunk = _mm256_loadu_si256(ptr);
+    let mut out_ptr = aligned_ptr;
 
+    while i + 16 <= total_samples {
+        // Cargar 16 samples (32 bytes) de una vez
+        let ptr = buffer.as_ptr().add(i * 2) as *const __m256i;
+        let chunk = _mm256_load_si256(ptr);
+
+        // Convertir los i16 a i32
         let low_128 = _mm256_castsi256_si128(chunk);
         let high_128 = _mm256_extracti128_si256::<1>(chunk);
 
         let low_i32 = _mm256_cvtepi16_epi32(low_128);
         let high_i32 = _mm256_cvtepi16_epi32(high_128);
 
-        // Escribimos directamente en packets, sin temp
-        _mm256_storeu_si256(out_ptr as *mut __m256i, low_i32);
-        _mm256_storeu_si256(out_ptr.add(8) as *mut __m256i, high_i32);
+        // Guardar resultados con operaciones alineadas
+        _mm256_store_si256(out_ptr as *mut __m256i, low_i32);
+        _mm256_store_si256(out_ptr.add(8) as *mut __m256i, high_i32);
 
         out_ptr = out_ptr.add(16);
         i += 16;
     }
 
-    // Resto sin AVX2
-    for chunk in buffer[i * 2..total_samples * 2].chunks_exact(2) {
-        *out_ptr = i16_to_i32(chunk);
-        out_ptr = out_ptr.add(1);
-    }
+    // Procesar elementos restantes
+    // while i < total_samples {
+    //     let ptr = buffer.as_ptr().add(i * 2);
+    //     *out_ptr = i16::from_le_bytes([*ptr, *ptr.add(1)]) as i32;
+    //     out_ptr = out_ptr.add(1);
+    //     i += 1;
+    // }
 
-    packets
+    buffer[i * 2..total_samples * 2]
+        .chunks_exact(2)
+        .enumerate()
+        .for_each(|(idx, chunk)| {
+            *out_ptr.add(idx) = i16_to_i32(chunk);
+        });
+
+    // Convertir la memoria alineada de vuelta a Vec<i32>
+    Vec::from_raw_parts(aligned_ptr, total_samples, total_samples)
 }
+
+// #[target_feature(enable = "avx2")]
+// unsafe fn decode_int16_avx2(buffer: &[u8], total_samples: usize) -> Vec<i32> {
+//     // Con AVX2, procesamos 16 i16 (32 bytes) a la vez.
+//     // FIXME: This vector is unaligned, we need to use an aligned vector for AVX2.
+//     // TODO: Use aligned_vec crate to create an aligned vector.
+//     let mut packets: Vec<i32> = Vec::with_capacity(total_samples);
+//     // let mut packets = AVec::<i32, ConstAlign<32>>::with_capacity(32, total_samples);
+//     packets.set_len(total_samples);
+
+//     let mut i = 0;
+//     let mut out_ptr = packets.as_mut_ptr(); // puntero a i32 en packets
+//     while i + 16 <= total_samples {
+//         let ptr = buffer.as_ptr().add(i * 2) as *const __m256i;
+//         let chunk = _mm256_loadu_si256(ptr);
+
+//         let low_128 = _mm256_castsi256_si128(chunk);
+//         let high_128 = _mm256_extracti128_si256::<1>(chunk);
+
+//         let low_i32 = _mm256_cvtepi16_epi32(low_128);
+//         let high_i32 = _mm256_cvtepi16_epi32(high_128);
+
+//         // Escribimos directamente en packets, sin temp
+//         _mm256_storeu_si256(out_ptr as *mut __m256i, low_i32);
+//         _mm256_storeu_si256(out_ptr.add(8) as *mut __m256i, high_i32);
+
+//         out_ptr = out_ptr.add(16);
+//         i += 16;
+//     }
+
+//     // Resto sin AVX2
+//     for chunk in buffer[i * 2..total_samples * 2].chunks_exact(2) {
+//         *out_ptr = i16_to_i32(chunk);
+//         out_ptr = out_ptr.add(1);
+//     }
+
+//     packets
+// }
+
+// #[target_feature(enable = "avx2")]
+// unsafe fn decode_int16_avx2(buffer: &[u8], total_samples: usize) -> Vec<i32> {
+//     // Usar un buffer alineado para mejor rendimiento SIMD
+//     let mut packets = AVec::<i32, ConstAlign<32>>::with_capacity(32, total_samples);
+//     let out_ptr = packets.as_mut_ptr();
+
+//     // Procesar 32 muestras por iteración
+//     let chunks = buffer.chunks_exact(64); // 32 muestras * 2 bytes
+//     let mut offset = 0;
+
+//     for chunk in chunks {
+//         let ptr = chunk.as_ptr() as *const __m256i;
+//         let chunk = _mm256_loadu_si256(ptr);
+
+//         // Dividir en componentes low/high
+//         let low = _mm256_extracti128_si256::<0>(chunk);
+//         let high = _mm256_extracti128_si256::<1>(chunk);
+
+//         // Convertir a i32
+//         let low_32 = _mm256_cvtepi16_epi32(low);
+//         let high_32 = _mm256_cvtepi16_epi32(high);
+
+//         // Almacenar resultados alineados
+//         _mm256_store_si256(out_ptr.add(offset) as *mut __m256i, low_32);
+//         _mm256_store_si256(out_ptr.add(offset + 8) as *mut __m256i, high_32);
+
+//         offset += 16;
+//     }
+
+//     // Procesar samples restantes
+//     let remaining = buffer.len() / 2 - offset;
+//     for i in 0..remaining {
+//         let idx = offset + i;
+//         let sample_idx = idx * 2;
+//         *out_ptr.add(idx) = i16_to_i32(&buffer[sample_idx..sample_idx + 2]);
+//     }
+
+//     packets.to_vec()
+// }
 
 #[target_feature(enable = "avx2")]
 unsafe fn decode_int32_avx2(buffer: &[u8], total_samples: usize) -> Vec<i32> {
