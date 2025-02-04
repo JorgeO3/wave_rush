@@ -1,16 +1,17 @@
-use std::fs::File;
 use wave_rush::*;
 
 fn main() -> Result<()> {
-    let file = File::open("input.wav")?;
+    // let file = std::fs::File::open("./data/dulce_carita.wav")?;
+    let file = std::fs::File::open("./data/input.wav")?;
     let wav_reader = WavReader::try_new(file)?;
     let mut wav_decoder = WavDecoder::try_new(wav_reader)?;
+    let mut packets = wav_decoder.packets();
 
-    let time = std::time::Instant::now();
-    for packet in wav_decoder.packets() {
-        let _ = packet.unwrap();
+    while let Some(packet) = packets.next()? {
+        let _packet = packet;
     }
-    println!("Elapsed time: {:?}", time.elapsed());
+
+    let data: Vec<i32> = Vec::new();
 
     Ok(())
 }
