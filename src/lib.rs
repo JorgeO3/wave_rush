@@ -1,14 +1,13 @@
-#![allow(unused)]
 use std::arch::x86_64::*;
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
 
-use aligned_vec::{AVec, ConstAlign};
-use fallible_streaming_iterator::FallibleStreamingIterator;
+use aligned_vec::{AVec, RuntimeAlign};
+pub use fallible_iterator::FallibleIterator;
 
-mod avec;
+// mod avec;
+mod fadvise;
 
 /// Number of samples per packet.
 pub const PACK_SIZE: usize = 1024 * 8;
@@ -64,6 +63,7 @@ struct CodecParams {
     pub num_channels: u16,
     pub block_align: Option<u16>,
     pub audio_format: Option<u16>,
+    pub byte_rate: Option<u32>,
 }
 
 /// A Tag holds a key-value pair of metadata.
@@ -143,7 +143,7 @@ pub struct FormatChunk {
 
 /// Represents the "LIST" chunk in a WAV file.
 pub struct ListChunk {
-    list_type: [u8; 4],
+    _list_type: [u8; 4],
     tags: Vec<Tag>,
 }
 
@@ -316,17 +316,17 @@ impl<'a, R: Read + Seek + Debug> ChunkParser<'a, R> {
     }
 
     fn parse_list_chunk(&mut self, chunk_size: usize) -> Result<WaveChunk> {
-        let list_type = self.read_exact::<4>()?;
+        let _list_type = self.read_exact::<4>()?;
         let remaining_size = chunk_size - 4;
         let mut tags = Vec::new();
 
-        if &list_type == b"INFO" {
+        if &_list_type == b"INFO" {
             self.parse_info_chunk(remaining_size, &mut tags)?;
         } else {
             self.skip_bytes(remaining_size)?;
         }
 
-        Ok(WaveChunk::List(ListChunk { list_type, tags }))
+        Ok(WaveChunk::List(ListChunk { _list_type, tags }))
     }
 
     fn parse_info_chunk(&mut self, mut remaining_size: usize, tags: &mut Vec<Tag>) -> Result<()> {
@@ -377,14 +377,24 @@ struct WavReaderOptions {
 /// WAV file reader.
 #[derive(Debug)]
 pub struct WavReader<R: Read + Seek + Debug> {
+    cursor: usize,
     buf: BufReader<R>,
-    opts: WavReaderOptions,
+    options: WavReaderOptions,
 }
 
 impl<R: Read + Seek + Debug> WavReader<R> {
     const RIFF_HEADER: [u8; 4] = *b"RIFF";
     const WAVE_HEADER: [u8; 4] = *b"WAVE";
     const BUFFER_SIZE: usize = 1024 * 32;
+
+    fn new(buf: BufReader<R>, options: WavReaderOptions) -> Self {
+        let cursor = options.data_start as usize;
+        Self {
+            buf,
+            cursor,
+            options,
+        }
+    }
 
     /// Attempts to create a new WavReader by parsing the WAV headers.
     pub fn try_new(file: R) -> Result<Self> {
@@ -429,7 +439,7 @@ impl<R: Read + Seek + Debug> WavReader<R> {
             WaveChunk::List(list) => Self::handle_list_chunk(&mut options, list),
         })?;
 
-        Ok(Self { buf, opts: options })
+        Ok(Self::new(buf, options))
     }
 
     fn handle_format_chunk(options: &mut WavReaderOptions, chunk: FormatChunk) -> Result<()> {
@@ -438,6 +448,7 @@ impl<R: Read + Seek + Debug> WavReader<R> {
         options.codec_params.bits_per_sample = Some(chunk.bits_per_sample);
         options.codec_params.block_align = Some(chunk.block_align);
         options.codec_params.audio_format = Some(chunk.audio_format);
+        options.codec_params.byte_rate = Some(chunk.byte_rate);
 
         let sample_format = match chunk.bits_per_sample {
             8 => SampleFormat::Uint8,
@@ -476,32 +487,48 @@ impl<R: Read + Seek + Debug> WavReader<R> {
 
     /// Returns the total number of frames.
     pub fn num_frames(&self) -> u64 {
-        self.opts.codec_params.num_frames.unwrap_or(0)
+        self.options.codec_params.num_frames.unwrap_or(0)
     }
 
     /// Returns the sample rate.
     pub fn sample_rate(&self) -> u32 {
-        self.opts.codec_params.sample_rate.unwrap_or(0)
+        self.options.codec_params.sample_rate.unwrap_or(0)
     }
 
     /// Returns the number of channels.
     pub fn num_channels(&self) -> u16 {
-        self.opts.codec_params.num_channels
+        self.options.codec_params.num_channels
     }
 
     /// Returns bits per sample.
     pub fn bits_per_sample(&self) -> u16 {
-        self.opts.codec_params.bits_per_sample.unwrap_or(0)
+        self.options.codec_params.bits_per_sample.unwrap_or(0)
     }
 
     /// Returns the sample format.
     pub fn sample_format(&self) -> &SampleFormat {
-        self.opts.codec_params.sample_format.as_ref().unwrap()
+        self.options.codec_params.sample_format.as_ref().unwrap()
     }
 
     /// Returns the metadata.
     pub fn metadata(&self) -> &HashMap<String, String> {
-        &self.opts.metadata
+        &self.options.metadata
+    }
+
+    /// Returns the total number of samples.
+    pub fn num_samples(&self) -> u64 {
+        self.num_frames() * self.num_channels() as u64
+    }
+
+    /// Returns the total number of bytes.
+    pub fn byte_rate(&self) -> u32 {
+        self.options.codec_params.byte_rate.unwrap_or(0)
+    }
+
+    fn read_exact(&mut self, buffer: &mut [u8]) -> Result<()> {
+        self.buf.read_exact(buffer)?;
+        self.cursor += buffer.len();
+        Ok(())
     }
 }
 
@@ -514,120 +541,91 @@ impl<R: Read + Seek + Debug> WavDecoder<R> {
     /// Creates a new WAV decoder from a `WavReader`.
     pub fn try_new(mut reader: WavReader<R>) -> Result<Self> {
         // Ensure the audio format is PCM (1).
-        if reader.opts.codec_params.audio_format != Some(1) {
+        if reader.options.codec_params.audio_format != Some(1) {
             return Err(Error::Static(
                 "Unsupported audio format (only PCM is supported)",
             ));
         }
 
-        reader.buf.seek(SeekFrom::Start(reader.opts.data_start))?;
+        reader
+            .buf
+            .seek(SeekFrom::Start(reader.options.data_start))?;
         Ok(Self { reader })
     }
 
     /// Returns an iterator over decoded audio packets.
     pub fn packets(&mut self) -> PacketsIterator<R> {
-        let data_end = self.reader.opts.data_end;
-        let sample_format = *self.reader.sample_format();
-        let num_channels = self.reader.num_channels();
-        PacketsIterator::new(&mut self.reader.buf, data_end, sample_format, num_channels)
+        PacketsIterator::new(&mut self.reader)
     }
 }
 
 /// Iterator over decoded audio samples.
 pub struct PacketsIterator<'a, R: Read + Seek + Debug> {
-    reader: &'a mut BufReader<R>,
-    data_end: u64,
-    sample_format: SampleFormat,
-    num_channels: u16,
-    buffer: AVec<u8>, // alineado a 32 bytes para AVX2
+    reader: &'a mut WavReader<R>,
+    wbuffer: AVec<i32, RuntimeAlign>,
+    rbuffer: AVec<u8, RuntimeAlign>,
     bytes_per_sample: usize,
-    total_sample_size: usize,
     packet_len_bytes: usize,
 }
 
 impl<'a, R: Read + Seek + Debug> PacketsIterator<'a, R> {
-    fn new(
-        reader: &'a mut BufReader<R>,
-        data_end: u64,
-        sample_format: SampleFormat,
-        num_channels: u16,
-    ) -> Self {
+    fn new(reader: &'a mut WavReader<R>) -> Self {
+        let sample_format = reader.sample_format();
+        let num_channels = reader.num_channels();
         let bytes_per_sample = sample_format.bytes_per_sample() as usize;
         let total_sample_size = bytes_per_sample * num_channels as usize;
         let packet_len_bytes = total_sample_size * PACK_SIZE;
-
-        let max_align = align_of::<__m256i>();
-
-        // Crea el AVec con alineación de 32 bytes
-        let mut buffer = AVec::with_capacity(max_align, packet_len_bytes);
-        let mut buffer2 = aligned_vec!(packet_len_bytes, 32);
-
-        buffer.resize(packet_len_bytes, 0);
+        let buffer = vec![0u8; packet_len_bytes];
+        let rbuffer = AVec::<u8, RuntimeAlign>::with_capacity(32, packet_len_bytes);
+        let wbuffer = AVec::<i32, RuntimeAlign>::with_capacity(32, packet_len_bytes);
 
         Self {
             reader,
-            buffer,
-            data_end,
-            sample_format,
-            num_channels,
+            rbuffer,
+            wbuffer,
             bytes_per_sample,
-            total_sample_size,
             packet_len_bytes,
         }
     }
 }
 
-// TODO: Refactor this function to avoid resizing the buffer.
-// TODO: Implement a streaming iterator to avoid creating a Vec for each packet.
-// TODO: Implement a SIMD decoder for each sample format.
-// TODO: Refactor this function for readability and performance.
-// TODO: Check if this is fastest than the previous implementation
-// TODO: (https://www.intel.com/content/www/us/en/docs/ipp/developer-guide-reference/2022-0/convert-001.html).
-// TODO: Check if Box<[i32]> is faster than Vec<i32> for this use case.
-// This will allow us to avoid the overhead of creating a Vec for each packet.
-impl<R: Read + Seek + Debug> Iterator for PacketsIterator<'_, R> {
-    type Item = Result<Vec<i32>>;
+impl<'a, R: Read + Seek + Debug> FallibleIterator for PacketsIterator<'a, R> {
+    type Item = &'a [u8];
+    type Error = Error;
 
-    fn next(&mut self) -> Option<Self::Item> {
-        // FIXME: This function call is to expensive, we should avoid it.
-        // TODO: Implement a manual buffer management to avoid this call.
-        let pos = match self.reader.stream_position() {
-            Ok(pos) => pos,
-            Err(e) => return Some(Err(Error::Io(e))),
-        };
+    fn next(&'_ mut self) -> Result<Option<Self::Item>> {
+        let cursor = self.reader.cursor;
+        let data_end = self.reader.options.data_end;
 
-        if pos >= self.data_end {
-            return None;
+        if cursor >= data_end as usize {
+            return Ok(None);
         }
 
-        // Ya no calculamos bytes_per_sample, total_sample_size, packet_len_bytes aquí, ya los tenemos.
-        let remaining = (self.data_end - pos) as usize;
+        let remaining = data_end as usize - cursor;
         let bytes_to_read = remaining.min(self.packet_len_bytes);
-        self.buffer.resize(bytes_to_read, 0); // FIXME: This is expensive
-
-        if let Err(e) = self.reader.read_exact(&mut self.buffer) {
-            return Some(Err(Error::Io(e)));
-        }
-
         let total_samples = bytes_to_read / self.bytes_per_sample;
 
-        use SampleFormat::*;
-        if std::is_x86_feature_detected!("avx2") {
+        let buffer = &mut self.rbuffer[..bytes_to_read];
+        self.reader.read_exact(buffer)?;
+
+        use SampleFormat as SF;
+        let packets = if std::is_x86_feature_detected!("avx2") {
             unsafe {
-                match self.sample_format {
-                    Int16 => Some(Ok(decode_int16_avx2(&self.buffer, total_samples))),
-                    Uint8 => Some(Ok(decode_uint8_avx2(&self.buffer, total_samples))),
-                    Int32 => Some(Ok(decode_int32_avx2(&self.buffer, total_samples))),
-                    Int24 => Some(Ok(decode_int24_scalar(&self.buffer, total_samples))),
+                match self.reader.sample_format() {
+                    SF::Int16 => decode_int16_avx2(buffer, total_samples),
+                    SF::Uint8 => decode_uint8_avx2(buffer, total_samples),
+                    SF::Int32 => decode_int32_avx2(buffer, total_samples),
+                    SF::Int24 => decode_int24_scalar(buffer, total_samples),
                 }
             }
         } else if std::is_x86_feature_detected!("sse4.1") {
             unsafe {
-                match self.sample_format {
-                    Int16 => Some(Ok(decode_int16_sse42(&self.buffer, total_samples))),
-                    Uint8 => Some(Ok(decode_uint8_sse42(&self.buffer, total_samples))),
-                    Int32 => Some(Ok(decode_int32_sse42(&self.buffer, total_samples))),
-                    Int24 => Some(Ok(decode_int24_scalar(&self.buffer, total_samples))),
+                // TODO: Fix the buffer size
+                match self.reader.sample_format() {
+                    SF::Int16 => decode_int16_sse42(buffer, total_samples),
+                    SF::Uint8 => decode_uint8_sse42(buffer, total_samples),
+                    SF::Int32 => decode_int32_sse42(buffer, total_samples),
+                    SF::Int24 => decode_int24_scalar(buffer, total_samples),
                 }
             }
         } else {
@@ -635,78 +633,28 @@ impl<R: Read + Seek + Debug> Iterator for PacketsIterator<'_, R> {
             for i in 0..total_samples {
                 let start = i * self.bytes_per_sample;
                 let end = start + self.bytes_per_sample;
-                if end > self.buffer.len() {
+                if end > buffer.len() {
                     break;
                 }
-                let sample = match self.sample_format {
-                    Uint8 => u8_to_i32(self.buffer[start]),
-                    Int16 => i16_to_i32(&self.buffer[start..end]),
-                    Int24 => i24_to_i32(&self.buffer[start..end]),
-                    Int32 => i32_to_i32(&self.buffer[start..end]),
+                let sample = match self.reader.sample_format() {
+                    SF::Uint8 => u8_to_i32(buffer[start]),
+                    SF::Int16 => i16_to_i32(&buffer[start..end]),
+                    SF::Int24 => i24_to_i32(&buffer[start..end]),
+                    SF::Int32 => i32_to_i32(&buffer[start..end]),
                 };
                 packets.push(sample);
             }
-            Some(Ok(packets))
-        }
+            packets
+        };
+
+        Ok(Some(packets))
     }
 }
-
-struct FailliblePacketsIterator<'a, R: Read + Seek + Debug> {
-    reader: &'a mut BufReader<R>,
-    data_end: u64,
-    sample_format: SampleFormat,
-    num_channels: u16,
-    buffer: AVec<u8>, // alineado a 32 bytes para AVX2
-    bytes_per_sample: usize,
-    total_sample_size: usize,
-    packet_len_bytes: usize,
-}
-
-impl<'a, R: Read + Seek + Debug> FailliblePacketsIterator<'a, R> {
-    fn new(
-        reader: &'a mut BufReader<R>,
-        data_end: u64,
-        sample_format: SampleFormat,
-        num_channels: u16,
-    ) -> Self {
-        let bytes_per_sample = sample_format.bytes_per_sample() as usize;
-        let total_sample_size = bytes_per_sample * num_channels as usize;
-        let packet_len_bytes = total_sample_size * PACK_SIZE;
-
-        let max_align = align_of::<__m256i>();
-
-        // Crea el AVec con alineación de 32 bytes
-        let mut buffer = AVec::with_capacity(max_align, packet_len_bytes);
-        buffer.resize(packet_len_bytes, 0);
-
-        Self {
-            reader,
-            buffer,
-            data_end,
-            sample_format,
-            num_channels,
-            bytes_per_sample,
-            total_sample_size,
-            packet_len_bytes,
-        }
-    }
-}
-
-// impl<'a, R: Read + Seek + Debug> FallibleStreamingIterator for FailliblePacketsIterator<'a, R> {
-//     type Item = Cow<'a, [i32]>;
-//     type Error = Error;
-
-//     fn advance(&mut self) -> std::result::Result<(), Error> {
-//         Ok(())
-//     }
-
-//     fn get(&self) -> Option<&Self::Item> {}
-// }
 
 #[target_feature(enable = "avx2")]
-unsafe fn decode_uint8_avx2(buffer: &[u8], total_samples: usize) -> Vec<i32> {
-    let mut packets: Vec<i32> = Vec::with_capacity(total_samples);
-    unsafe { packets.set_len(total_samples) };
+unsafe fn decode_uint8_avx2<'a>(buffer: &[u8], total_samples: usize) -> &'a [i32] {
+    let align = align_of::<__m256i>();
+    let mut packets: Vec<i32> = aligned_vec!(i32, total_samples, align);
 
     let mut out_ptr = packets.as_mut_ptr();
     let offset = _mm256_set1_epi8(128u8 as i8);
@@ -752,44 +700,24 @@ unsafe fn decode_uint8_avx2(buffer: &[u8], total_samples: usize) -> Vec<i32> {
         out_ptr = out_ptr.add(1);
     }
 
-    packets
+    &packets
 }
 
-macro_rules! aligned_vec {
-    ($size:expr, $align:expr) => {{
-        let size = $size;
-        let layout = Layout::from_size_align(size, $align).unwrap();
-
-        let aligned_ptr = unsafe { alloc(layout) };
-        if aligned_ptr.is_null() {
-            std::alloc::handle_alloc_error(layout)
-        }
-
-        unsafe { Vec::from_raw_parts(aligned_ptr as *mut _, size, size) }
-    }};
-}
-
-use std::alloc::{alloc, Layout};
-
+// TODO: change the aligened_vec macro for the align ed_vec crate
+// TODO: this macro is using undefine
 #[target_feature(enable = "avx2")]
 unsafe fn decode_int16_avx2(buffer: &[u8], total_samples: usize) -> Vec<i32> {
     // Calcular el layout para alineación de 32 bytes
-    let size = std::mem::size_of::<i32>() * total_samples;
-    let layout = Layout::from_size_align(size, 32).unwrap();
-
-    // Allocar memoria alineada
-    let aligned_ptr = alloc(layout) as *mut i32;
-    if aligned_ptr.is_null() {
-        std::alloc::handle_alloc_error(layout)
-    };
+    let align = align_of::<__m256i>();
+    let mut packets = aligned_vec!(i32, total_samples, align);
 
     let mut i = 0;
-    let mut out_ptr = aligned_ptr;
+    let mut out_ptr = packets.as_mut_ptr();
 
     while i + 16 <= total_samples {
         // Cargar 16 samples (32 bytes) de una vez
         let ptr = buffer.as_ptr().add(i * 2) as *const __m256i;
-        let chunk = _mm256_load_si256(ptr);
+        let chunk = _mm256_loadu_si256(ptr);
 
         // Convertir los i16 a i32
         let low_128 = _mm256_castsi256_si128(chunk);
@@ -807,106 +735,50 @@ unsafe fn decode_int16_avx2(buffer: &[u8], total_samples: usize) -> Vec<i32> {
     }
 
     // Procesar elementos restantes
-    // while i < total_samples {
-    //     let ptr = buffer.as_ptr().add(i * 2);
-    //     *out_ptr = i16::from_le_bytes([*ptr, *ptr.add(1)]) as i32;
-    //     out_ptr = out_ptr.add(1);
-    //     i += 1;
-    // }
+    for chunk in buffer[i * 2..total_samples * 2].chunks_exact(2) {
+        *out_ptr = i16_to_i32(chunk);
+        out_ptr = out_ptr.add(1);
+    }
 
-    buffer[i * 2..total_samples * 2]
-        .chunks_exact(2)
-        .enumerate()
-        .for_each(|(idx, chunk)| {
-            *out_ptr.add(idx) = i16_to_i32(chunk);
-        });
-
-    // Convertir la memoria alineada de vuelta a Vec<i32>
-    Vec::from_raw_parts(aligned_ptr, total_samples, total_samples)
+    packets
 }
 
-// #[target_feature(enable = "avx2")]
-// unsafe fn decode_int16_avx2(buffer: &[u8], total_samples: usize) -> Vec<i32> {
-//     // Con AVX2, procesamos 16 i16 (32 bytes) a la vez.
-//     // FIXME: This vector is unaligned, we need to use an aligned vector for AVX2.
-//     // TODO: Use aligned_vec crate to create an aligned vector.
-//     let mut packets: Vec<i32> = Vec::with_capacity(total_samples);
-//     // let mut packets = AVec::<i32, ConstAlign<32>>::with_capacity(32, total_samples);
-//     packets.set_len(total_samples);
+// pub fn decode_int16(buffer: &[u8], total_samples: usize) -> Vec<i32> {
+//     let align = align_of::<i32x16>();
+//     let mut packets = aligned_vec!(i32, total_samples, align);
 
 //     let mut i = 0;
-//     let mut out_ptr = packets.as_mut_ptr(); // puntero a i32 en packets
 //     while i + 16 <= total_samples {
-//         let ptr = buffer.as_ptr().add(i * 2) as *const __m256i;
-//         let chunk = _mm256_loadu_si256(ptr);
+//         let chunk = &buffer[i * 2..(i + 16) * 2];
+//         let mut i16_array = [0_i16; 16];
 
-//         let low_128 = _mm256_castsi256_si128(chunk);
-//         let high_128 = _mm256_extracti128_si256::<1>(chunk);
+//         // Cargar 16 samples de una vez
+//         chunk.chunks_exact(2).enumerate().for_each(|(j, bytes)| {
+//             i16_array[j] = i16::from_le_bytes([bytes[0], bytes[1]]);
+//         });
 
-//         let low_i32 = _mm256_cvtepi16_epi32(low_128);
-//         let high_i32 = _mm256_cvtepi16_epi32(high_128);
+//         // Convertir y almacenar
+//         let simd_data: i32x16 = i16x16::from_array(i16_array).cast();
+//         packets[i..i + 16].copy_from_slice(&simd_data.to_array());
 
-//         // Escribimos directamente en packets, sin temp
-//         _mm256_storeu_si256(out_ptr as *mut __m256i, low_i32);
-//         _mm256_storeu_si256(out_ptr.add(8) as *mut __m256i, high_i32);
-
-//         out_ptr = out_ptr.add(16);
 //         i += 16;
 //     }
 
-//     // Resto sin AVX2
-//     for chunk in buffer[i * 2..total_samples * 2].chunks_exact(2) {
-//         *out_ptr = i16_to_i32(chunk);
-//         out_ptr = out_ptr.add(1);
+//     // Procesar elementos restantes
+//     for j in i..total_samples {
+//         let bytes = &buffer[j * 2..j * 2 + 2];
+//         packets[j] = i16::from_le_bytes([bytes[0], bytes[1]]) as i32;
 //     }
 
 //     packets
 // }
 
-// #[target_feature(enable = "avx2")]
-// unsafe fn decode_int16_avx2(buffer: &[u8], total_samples: usize) -> Vec<i32> {
-//     // Usar un buffer alineado para mejor rendimiento SIMD
-//     let mut packets = AVec::<i32, ConstAlign<32>>::with_capacity(32, total_samples);
-//     let out_ptr = packets.as_mut_ptr();
-
-//     // Procesar 32 muestras por iteración
-//     let chunks = buffer.chunks_exact(64); // 32 muestras * 2 bytes
-//     let mut offset = 0;
-
-//     for chunk in chunks {
-//         let ptr = chunk.as_ptr() as *const __m256i;
-//         let chunk = _mm256_loadu_si256(ptr);
-
-//         // Dividir en componentes low/high
-//         let low = _mm256_extracti128_si256::<0>(chunk);
-//         let high = _mm256_extracti128_si256::<1>(chunk);
-
-//         // Convertir a i32
-//         let low_32 = _mm256_cvtepi16_epi32(low);
-//         let high_32 = _mm256_cvtepi16_epi32(high);
-
-//         // Almacenar resultados alineados
-//         _mm256_store_si256(out_ptr.add(offset) as *mut __m256i, low_32);
-//         _mm256_store_si256(out_ptr.add(offset + 8) as *mut __m256i, high_32);
-
-//         offset += 16;
-//     }
-
-//     // Procesar samples restantes
-//     let remaining = buffer.len() / 2 - offset;
-//     for i in 0..remaining {
-//         let idx = offset + i;
-//         let sample_idx = idx * 2;
-//         *out_ptr.add(idx) = i16_to_i32(&buffer[sample_idx..sample_idx + 2]);
-//     }
-
-//     packets.to_vec()
-// }
-
 #[target_feature(enable = "avx2")]
 unsafe fn decode_int32_avx2(buffer: &[u8], total_samples: usize) -> Vec<i32> {
     // Procesamos 8 i32 (32 bytes) a la vez con AVX2
-    let mut packets: Vec<i32> = Vec::with_capacity(total_samples);
+    let align = align_of::<__m256i>();
+    let mut packets = aligned_vec!(i32, total_samples, align);
+
     let mut i = 0;
     let mut out_ptr = packets.as_mut_ptr();
 
@@ -931,7 +803,9 @@ unsafe fn decode_int32_avx2(buffer: &[u8], total_samples: usize) -> Vec<i32> {
 #[target_feature(enable = "sse4.1")]
 unsafe fn decode_uint8_sse42(buffer: &[u8], total_samples: usize) -> Vec<i32> {
     // Con SSE procesamos 16 u8 -> 16 i32 por iter.
-    let mut packets: Vec<i32> = Vec::with_capacity(total_samples);
+    let align = align_of::<__m128>();
+    let mut packets = aligned_vec!(i32, total_samples, align);
+
     let mut i = 0;
     let offset = _mm_set1_epi8(128u8 as i8);
     let mut out_ptr = packets.as_mut_ptr();
@@ -974,7 +848,9 @@ unsafe fn decode_uint8_sse42(buffer: &[u8], total_samples: usize) -> Vec<i32> {
 #[target_feature(enable = "sse4.1")]
 unsafe fn decode_int16_sse42(buffer: &[u8], total_samples: usize) -> Vec<i32> {
     // Con SSE4.1 procesamos 8 i16 = 8 i32 por iter
-    let mut packets: Vec<i32> = Vec::with_capacity(total_samples);
+    let align = align_of::<__m128>();
+    let mut packets = aligned_vec!(i32, total_samples, align);
+
     let mut i = 0;
     let mut out_ptr = packets.as_mut_ptr();
 
@@ -1002,11 +878,8 @@ unsafe fn decode_int16_sse42(buffer: &[u8], total_samples: usize) -> Vec<i32> {
 }
 
 fn decode_int24_scalar(buffer: &[u8], total_samples: usize) -> Vec<i32> {
-    // Int24 es complicado de vectorizar debido a que 3 bytes por muestra no alinean bien con 128 bits.
-    // Podrías crear lógica para empaquetar bytes en vectores y extraerlos,
-    // pero es complejo y puede no justificarlo.
-    // Aquí lo mantenemos escalar:
     let mut packets = Vec::with_capacity(total_samples);
+
     for i in 0..total_samples {
         let start = i * 3;
         let end = start + 3;
@@ -1015,13 +888,16 @@ fn decode_int24_scalar(buffer: &[u8], total_samples: usize) -> Vec<i32> {
         }
         packets.push(i24_to_i32(&buffer[start..end]));
     }
+
     packets
 }
 
 #[target_feature(enable = "sse2")]
 unsafe fn decode_int32_sse42(buffer: &[u8], total_samples: usize) -> Vec<i32> {
     // Con SSE2 procesamos 4 i32 a la vez
-    let mut packets: Vec<i32> = Vec::with_capacity(total_samples);
+    let align = align_of::<__m128>();
+    let mut packets = aligned_vec!(i32, total_samples, align);
+
     let mut i = 0;
     let mut out_ptr = packets.as_mut_ptr();
 
@@ -1043,25 +919,25 @@ unsafe fn decode_int32_sse42(buffer: &[u8], total_samples: usize) -> Vec<i32> {
 
 #[inline(always)]
 pub fn u8_to_i32(byte: u8) -> i32 {
-    ((byte as i32) << 24 >> 24) - 128
+    (byte as i8 as i32).saturating_sub(128)
 }
 
 #[inline(always)]
 pub fn i16_to_i32(bytes: &[u8]) -> i32 {
-    assert_eq!(bytes.len(), 2, "Invalid i16 sample size");
-    ((bytes[1] as i32) << 8 | (bytes[0] as i32)) << 16 >> 16
+    debug_assert_eq!(bytes.len(), 2, "Invalid i16 sample size");
+    i16::from_le_bytes(bytes.try_into().unwrap()) as i32
 }
 
 #[inline(always)]
 pub fn i24_to_i32(bytes: &[u8]) -> i32 {
-    assert_eq!(bytes.len(), 3, "Invalid i24 sample size");
-    ((bytes[2] as i32) << 16 | (bytes[1] as i32) << 8 | (bytes[0] as i32)) << 8 >> 8
+    debug_assert_eq!(bytes.len(), 3, "Invalid i24 sample size");
+    ((bytes[2] as i32) << 24 >> 8) | ((bytes[1] as i32) << 16) | ((bytes[0] as i32) << 8)
 }
 
 #[inline(always)]
 pub fn i32_to_i32(bytes: &[u8]) -> i32 {
-    assert_eq!(bytes.len(), 4, "Invalid i32 sample size");
-    (bytes[3] as i32) << 24 | (bytes[2] as i32) << 16 | (bytes[1] as i32) << 8 | (bytes[0] as i32)
+    debug_assert_eq!(bytes.len(), 4, "Invalid i32 sample size");
+    i32::from_le_bytes(bytes.try_into().unwrap())
 }
 
 #[cfg(test)]
@@ -1123,18 +999,6 @@ mod tests {
             Err(Error::Static(msg)) => assert_eq!(msg, "Invalid WAVE header"),
             _ => panic!("Expected 'Invalid WAVE header' error"),
         }
-    }
-
-    #[test]
-    fn minimal_wav_header_parses_correctly() {
-        let data = minimal_wav_header(44100, 2, 16);
-        let cursor = Cursor::new(data);
-        let reader = WavReader::try_new(cursor).expect("Failed to parse minimal WAV header");
-        assert_eq!(reader.sample_rate(), 44100);
-        assert_eq!(reader.num_channels(), 2);
-        assert_eq!(reader.bits_per_sample(), 16);
-        assert_eq!(*reader.sample_format(), SampleFormat::Int16);
-        assert_eq!(reader.num_frames(), 0);
     }
 
     #[test]
@@ -1202,7 +1066,7 @@ mod tests {
         let reader = WavReader::try_new(cursor).expect("Failed to parse");
         let mut decoder = WavDecoder::try_new(reader).expect("Failed to create decoder");
         let mut packets = decoder.packets();
-        assert!(packets.next().is_none());
+        assert!(packets.next().unwrap().is_none());
     }
 
     #[test]
@@ -1216,13 +1080,13 @@ mod tests {
         let mut decoder = WavDecoder::try_new(reader).expect("Failed to create decoder");
         let mut packets = decoder.packets();
 
-        if let Some(Ok(p)) = packets.next() {
+        if let Some(p) = packets.next().unwrap() {
             assert_eq!(p.len(), 512);
         } else {
             panic!("Expected a partial packet of 512 samples");
         }
 
-        assert!(packets.next().is_none());
+        assert!(packets.next().unwrap().is_none());
     }
 
     #[test]
@@ -1278,8 +1142,8 @@ mod tests {
         data.extend_from_slice(b"data");
         data.extend_from_slice(&(data_size as u32).to_le_bytes());
 
-        let mut rng = rand::thread_rng();
-        let random_bytes: Vec<u8> = (0..data_size).map(|_| rng.gen()).collect();
+        let mut rng = rand::rng();
+        let random_bytes: Vec<u8> = (0..data_size).map(|_| rng.random()).collect();
         data.extend_from_slice(&random_bytes);
 
         let cursor = Cursor::new(data);
@@ -1523,13 +1387,13 @@ mod tests {
         let mut decoder = WavDecoder::try_new(reader).expect("Failed to create decoder");
         let mut packets = decoder.packets();
 
-        if let Some(Ok(packet)) = packets.next() {
+        if let Some(packet) = packets.next().unwrap() {
             assert_eq!(packet.len(), 10);
         } else {
             panic!("Expected one partial packet with 10 samples");
         }
 
-        assert!(packets.next().is_none());
+        assert!(packets.next().unwrap().is_none());
     }
 
     #[test]
@@ -1548,20 +1412,20 @@ mod tests {
         let mut packets = decoder.packets();
 
         // First packet
-        if let Some(Ok(packet)) = packets.next() {
+        if let Some(packet) = packets.next().unwrap() {
             assert_eq!(packet.len(), 1024 * 2);
         } else {
             panic!("Expected first packet");
         }
 
         // Second packet
-        if let Some(Ok(packet)) = packets.next() {
+        if let Some(packet) = packets.next().unwrap() {
             assert_eq!(packet.len(), 1024 * 2);
         } else {
             panic!("Expected second packet");
         }
 
-        assert!(packets.next().is_none());
+        assert!(packets.next().unwrap().is_none());
     }
 
     #[test]
@@ -1585,5 +1449,262 @@ mod tests {
         // If it doesn't crash, at least we have some metadata?
         // We just check not empty:
         assert!(!meta.is_empty());
+    }
+
+    // =========================
+    // Tests existentes
+    // =========================
+
+    #[test]
+    fn invalid_riff_header3() {
+        let invalid = b"XXXX\x00\x00\x00\x00WAVE".to_vec();
+        let cursor = Cursor::new(invalid);
+        let reader = WavReader::try_new(cursor);
+        assert!(reader.is_err());
+        match reader {
+            Err(Error::Static(msg)) => assert_eq!(msg, "Invalid RIFF header"),
+            _ => panic!("Expected 'Invalid RIFF header' error"),
+        }
+    }
+
+    #[test]
+    fn invalid_wave_header2() {
+        let invalid = b"RIFF\x24\x00\x00\x00XXXX".to_vec();
+        let cursor = Cursor::new(invalid);
+        let reader = WavReader::try_new(cursor);
+        assert!(reader.is_err());
+        match reader {
+            Err(Error::Static(msg)) => assert_eq!(msg, "Invalid WAVE header"),
+            _ => panic!("Expected 'Invalid WAVE header' error"),
+        }
+    }
+
+    #[test]
+    fn minimal_wav_header_parses_correctly() {
+        let data = minimal_wav_header(44100, 2, 16);
+        let cursor = Cursor::new(data);
+        let reader = WavReader::try_new(cursor).expect("Failed to parse minimal WAV header");
+        assert_eq!(reader.sample_rate(), 44100);
+        assert_eq!(reader.num_channels(), 2);
+        assert_eq!(reader.bits_per_sample(), 16);
+        assert_eq!(*reader.sample_format(), SampleFormat::Int16);
+        assert_eq!(reader.num_frames(), 0);
+    }
+
+    // ... (aquí irían los tests ya existentes)
+
+    // =========================
+    // Tests adicionales
+    // =========================
+
+    /// Prueba las funciones de conversión de muestras.
+    #[test]
+    fn test_sample_conversions() {
+        // u8_to_i32: se espera que:
+        //  - 128 -> (128 as i8 = -128) - 128 = -256
+        //  - 0   -> (0 as i8 = 0) - 128 = -128
+        //  - 255 -> (255 as i8 = -1) - 128 = -129
+        assert_eq!(u8_to_i32(128), -256);
+        assert_eq!(u8_to_i32(0), -128);
+        assert_eq!(u8_to_i32(255), -129);
+
+        // i16_to_i32: probar valores mínimos y máximos
+        let max_i16: i16 = 32767;
+        let min_i16: i16 = -32768;
+        assert_eq!(i16_to_i32(&max_i16.to_le_bytes()), 32767);
+        assert_eq!(i16_to_i32(&min_i16.to_le_bytes()), -32768);
+
+        // i24_to_i32: probar algunos casos conocidos.
+        // Caso 0:
+        assert_eq!(i24_to_i32(&[0x00, 0x00, 0x00]), 0);
+        // Caso máximo positivo: [0xFF, 0xFF, 0x7F] se espera 0x7FFFFF (8_388_607)
+        assert_eq!(i24_to_i32(&[0xFF, 0xFF, 0x7F]), 0x7FFFFF);
+        // Caso mínimo negativo: [0x00, 0x00, 0x80] se espera -0x800000 (-8_388_608)
+        assert_eq!(i24_to_i32(&[0x00, 0x00, 0x80]), -0x800000);
+
+        // i32_to_i32: conversión directa de 4 bytes.
+        let val: i32 = 123456789;
+        assert_eq!(i32_to_i32(&val.to_le_bytes()), val);
+    }
+
+    /// Prueba la función de decodificación escalar para muestras de 24 bits.
+    #[test]
+    fn test_decode_int24_scalar() {
+        // Se crearán casos de prueba con muestras conocidas.
+        let test_cases = vec![
+            (vec![0x00, 0x00, 0x00], 0),
+            (vec![0xFF, 0xFF, 0x7F], 0x7FFFFF),  // máximo positivo
+            (vec![0x00, 0x00, 0x80], -0x800000), // mínimo negativo
+        ];
+        for (bytes, expected) in test_cases {
+            let result = decode_int24_scalar(&bytes, 1);
+            assert_eq!(result[0], expected, "Failed for bytes: {:?}", bytes);
+        }
+    }
+
+    /// Prueba la rutina SIMD AVX2 para decodificar muestras Uint8.
+    #[test]
+    fn test_decode_uint8_avx2() {
+        if std::is_x86_feature_detected!("avx2") {
+            let data: Vec<u8> = (0..64)
+                .map(|x| 128u8.wrapping_add((x % 128) as u8))
+                .collect();
+            let total_samples = data.len();
+            let result = unsafe { decode_uint8_avx2(&data, total_samples) };
+            let expected: Vec<i32> = data.iter().map(|&b| u8_to_i32(b)).collect();
+            assert_eq!(result, expected);
+        }
+    }
+
+    /// Prueba la rutina SIMD AVX2 para decodificar muestras Int16.
+    #[test]
+    fn test_decode_int16_avx2() {
+        if std::is_x86_feature_detected!("avx2") {
+            let samples: Vec<i16> = (0..32).map(|x| (x as i16).wrapping_sub(16)).collect();
+            let mut data: Vec<u8> = Vec::new();
+            for sample in &samples {
+                data.extend_from_slice(&sample.to_le_bytes());
+            }
+            let total_samples = samples.len();
+            let result = unsafe { decode_int16_avx2(&data, total_samples) };
+            let expected: Vec<i32> = samples.into_iter().map(|x| x as i32).collect();
+            assert_eq!(result, expected);
+        }
+    }
+
+    /// Prueba la rutina SIMD AVX2 para decodificar muestras Int32.
+    #[test]
+    fn test_decode_int32_avx2() {
+        if std::is_x86_feature_detected!("avx2") {
+            let samples: Vec<i32> = (0..16).map(|x| x * 1000).collect();
+            let mut data: Vec<u8> = Vec::new();
+            for sample in &samples {
+                data.extend_from_slice(&sample.to_le_bytes());
+            }
+            let total_samples = samples.len();
+            let result = unsafe { decode_int32_avx2(&data, total_samples) };
+            assert_eq!(result, samples);
+        }
+    }
+
+    /// Prueba la rutina SIMD SSE4.1 para decodificar muestras Uint8.
+    #[test]
+    fn test_decode_uint8_sse42() {
+        if std::is_x86_feature_detected!("sse4.1") {
+            let data: Vec<u8> = (0..32)
+                .map(|x| 128u8.wrapping_add((x % 128) as u8))
+                .collect();
+            let total_samples = data.len();
+            let result = unsafe { decode_uint8_sse42(&data, total_samples) };
+            let expected: Vec<i32> = data.iter().map(|&b| u8_to_i32(b)).collect();
+            assert_eq!(result, expected);
+        }
+    }
+
+    /// Prueba la rutina SIMD SSE4.1 para decodificar muestras Int16.
+    #[test]
+    fn test_decode_int16_sse42() {
+        if std::is_x86_feature_detected!("sse4.1") {
+            let samples: Vec<i16> = (0..16).map(|x| (x as i16).wrapping_sub(8)).collect();
+            let mut data: Vec<u8> = Vec::new();
+            for sample in &samples {
+                data.extend_from_slice(&sample.to_le_bytes());
+            }
+            let total_samples = samples.len();
+            let result = unsafe { decode_int16_sse42(&data, total_samples) };
+            let expected: Vec<i32> = samples.into_iter().map(|x| x as i32).collect();
+            assert_eq!(result, expected);
+        }
+    }
+
+    /// Prueba la rutina SIMD SSE4.1 para decodificar muestras Int32.
+    #[test]
+    fn test_decode_int32_sse42() {
+        if std::is_x86_feature_detected!("sse4.1") {
+            let samples: Vec<i32> = (0..8).map(|x| x * -500).collect();
+            let mut data: Vec<u8> = Vec::new();
+            for sample in &samples {
+                data.extend_from_slice(&sample.to_le_bytes());
+            }
+            let total_samples = samples.len();
+            let result = unsafe { decode_int32_sse42(&data, total_samples) };
+            assert_eq!(result, samples);
+        }
+    }
+
+    /// Prueba que el parser salta correctamente un chunk desconocido.
+    #[test]
+    fn test_unknown_chunk_skipping() {
+        // Se crea un WAV con un chunk desconocido "XXXX" de 4 bytes seguido de un chunk "data".
+        let mut data = minimal_wav_header(44100, 2, 16);
+        data.extend_from_slice(b"XXXX");
+        data.extend_from_slice(&4u32.to_le_bytes());
+        data.extend_from_slice(&[0u8; 4]); // Contenido arbitrario del chunk desconocido
+                                           // Agregar un chunk data con 8 bytes de datos
+        data.extend_from_slice(b"data");
+        data.extend_from_slice(&(8u32.to_le_bytes()));
+        data.extend_from_slice(&[0x00; 8]);
+
+        let cursor = Cursor::new(data);
+        let reader = WavReader::try_new(cursor).expect("Should parse even with unknown chunk");
+        // Se verifica que el chunk "fmt " se leyó correctamente (por ejemplo, comprobando el sample_rate)
+        assert_eq!(reader.sample_rate(), 44100);
+    }
+
+    /// Prueba que múltiples chunks desconocidos se salten sin afectar la lectura.
+    #[test]
+    fn test_multiple_unknown_chunks() {
+        let mut data = minimal_wav_header(22050, 1, 8);
+        // Insertar dos chunks desconocidos
+        for _ in 0..2 {
+            data.extend_from_slice(b"ABCD");
+            data.extend_from_slice(&8u32.to_le_bytes());
+            data.extend_from_slice(&[0xFF; 8]);
+        }
+        // Agregar un chunk data con 4 bytes (recordando que en 8 bits y 1 canal block_align = 1)
+        data.extend_from_slice(b"data");
+        data.extend_from_slice(&(4u32.to_le_bytes()));
+        data.extend_from_slice(&[0x80; 4]);
+
+        let cursor = Cursor::new(data);
+        let reader = WavReader::try_new(cursor).expect("Should skip unknown chunks");
+        assert_eq!(reader.num_frames(), 4);
+    }
+
+    /// Prueba un error al encontrar un chunk con datos incompletos.
+    #[test]
+    fn test_incomplete_chunk_error() {
+        let mut data = minimal_wav_header(44100, 2, 16);
+        // Agregar un chunk "JUNK" que indique 10 bytes pero solo provee 5
+        data.extend_from_slice(b"JUNK");
+        data.extend_from_slice(&10u32.to_le_bytes());
+        data.extend_from_slice(&[0x00; 5]);
+
+        let cursor = Cursor::new(data);
+        let reader = WavReader::try_new(cursor);
+        assert!(reader.is_err());
+        match reader {
+            Err(Error::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {}
+            _ => panic!("Expected UnexpectedEof error"),
+        }
+    }
+
+    /// Prueba que un chunk LIST incompleto genere un error de EOF.
+    #[test]
+    fn test_incomplete_list_chunk_error() {
+        let mut data = minimal_wav_header(44100, 2, 16);
+        data.extend_from_slice(b"LIST");
+        data.extend_from_slice(&12u32.to_le_bytes()); // 12 bytes indicados
+        data.extend_from_slice(b"INFO"); // 4 bytes (restan 8)
+                                         // Agregar datos incompletos para el tag (por ejemplo, solo 2 bytes en vez de los 4 esperados)
+        data.extend_from_slice(b"AB");
+
+        let cursor = Cursor::new(data);
+        let reader = WavReader::try_new(cursor);
+        assert!(reader.is_err());
+        match reader {
+            Err(Error::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {}
+            _ => panic!("Expected UnexpectedEof error for incomplete LIST chunk"),
+        }
     }
 }
