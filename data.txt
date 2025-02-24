@@ -1,0 +1,413 @@
+.section .text.wave_rush::main,"ax",@progbits
+	.p2align	4, 0x90
+.type	wave_rush::main,@function
+wave_rush::main:
+	.cfi_startproc
+	.cfi_personality 155, DW.ref.rust_eh_personality
+	.cfi_lsda 27, .Lexception5
+	push rbp
+	.cfi_def_cfa_offset 16
+	push r15
+	.cfi_def_cfa_offset 24
+	push r14
+	.cfi_def_cfa_offset 32
+	push r13
+	.cfi_def_cfa_offset 40
+	push r12
+	.cfi_def_cfa_offset 48
+	push rbx
+	.cfi_def_cfa_offset 56
+	sub rsp, 568
+	.cfi_def_cfa_offset 624
+	.cfi_offset rbx, -56
+	.cfi_offset r12, -48
+	.cfi_offset r13, -40
+	.cfi_offset r14, -32
+	.cfi_offset r15, -24
+	.cfi_offset rbp, -16
+	mov rbx, rdi
+	movabs rax, 1881195675648
+	mov qword ptr [rsp + 8], rax
+	mov dword ptr [rsp + 16], 0
+	mov word ptr [rsp + 20], 0
+	mov byte ptr [rsp + 16], 1
+	lea rdx, [rip + .L__unnamed_28]
+	lea rdi, [rsp + 224]
+	lea rsi, [rsp + 8]
+	mov ecx, 9
+	call qword ptr [rip + std::fs::OpenOptions::_open@GOTPCREL]
+	test byte ptr [rsp + 224], 1
+	je .LBB28_1
+	mov rax, qword ptr [rsp + 232]
+	mov qword ptr [rbx], 1
+	mov qword ptr [rbx + 8], rax
+	jmp .LBB28_68
+.LBB28_1:
+	mov ebp, dword ptr [rsp + 228]
+	mov rax, qword ptr [rip + __rust_no_alloc_shim_is_unstable@GOTPCREL]
+	movzx eax, byte ptr [rax]
+	mov edi, 131072
+	mov esi, 1
+	call qword ptr [rip + __rust_alloc@GOTPCREL]
+	test rax, rax
+	je .LBB28_2
+	mov qword ptr [rsp + 176], rax
+	mov qword ptr [rsp + 184], 131072
+	pxor xmm0, xmm0
+	movdqu xmmword ptr [rsp + 192], xmm0
+	mov qword ptr [rsp + 208], 0
+	mov dword ptr [rsp + 216], ebp
+	mov dword ptr [rsp + 8], 0
+	lea rdi, [rsp + 176]
+	lea rsi, [rsp + 8]
+	mov edx, 4
+	call <std::io::buffered::bufreader::BufReader<R> as std::io::Read>::read_exact
+	mov r14, rax
+	test rax, rax
+	je .LBB28_10
+.LBB28_18:
+	mov r15d, 1
+.LBB28_26:
+	mov rsi, qword ptr [rsp + 184]
+	test rsi, rsi
+	je .LBB28_28
+	mov rdi, qword ptr [rsp + 176]
+	mov edx, 1
+	call qword ptr [rip + __rust_dealloc@GOTPCREL]
+.LBB28_28:
+	mov edi, dword ptr [rsp + 216]
+	call qword ptr [rip + close@GOTPCREL]
+.LBB28_29:
+	mov qword ptr [rbx], r15
+	mov qword ptr [rbx + 8], r14
+	mov qword ptr [rbx + 16], r12
+.LBB28_68:
+	mov rax, rbx
+	add rsp, 568
+	.cfi_def_cfa_offset 56
+	pop rbx
+	.cfi_def_cfa_offset 48
+	pop r12
+	.cfi_def_cfa_offset 40
+	pop r13
+	.cfi_def_cfa_offset 32
+	pop r14
+	.cfi_def_cfa_offset 24
+	pop r15
+	.cfi_def_cfa_offset 16
+	pop rbp
+	.cfi_def_cfa_offset 8
+	ret
+.LBB28_10:
+	.cfi_def_cfa_offset 624
+	mov r12d, 19
+	cmp dword ptr [rsp + 8], 1179011410
+	jne .LBB28_11
+	mov dword ptr [rsp + 8], 0
+	lea rdi, [rsp + 176]
+	lea rsi, [rsp + 8]
+	mov edx, 4
+	call <std::io::buffered::bufreader::BufReader<R> as std::io::Read>::read_exact
+	mov r14, rax
+	test rax, rax
+	jne .LBB28_18
+	mov r13d, dword ptr [rsp + 8]
+	mov dword ptr [rsp + 8], 0
+	lea r15, [rsp + 176]
+	lea rsi, [rsp + 8]
+	mov edx, 4
+	mov rdi, r15
+	call <std::io::buffered::bufreader::BufReader<R> as std::io::Read>::read_exact
+	mov r14, rax
+	test rax, rax
+	jne .LBB28_18
+	cmp dword ptr [rsp + 8], 1163280727
+	jne .LBB28_17
+	mov r14, qword ptr [rip + std::hash::random::RandomState::new::KEYS::{{constant}}::{{closure}}::VAL@GOTTPOFF]
+	cmp dword ptr fs:[r14], 1
+	jne .LBB28_21
+	mov rax, qword ptr fs:[r14 + 8]
+	mov rdx, qword ptr fs:[r14 + 16]
+	jmp .LBB28_23
+.LBB28_11:
+	lea r14, [rip + .L__unnamed_29]
+	xor r15d, r15d
+	jmp .LBB28_26
+.LBB28_17:
+	lea r14, [rip + .L__unnamed_30]
+	xor r15d, r15d
+	jmp .LBB28_26
+.LBB28_21:
+	call qword ptr [rip + std::sys::random::linux::hashmap_random_keys@GOTPCREL]
+	mov qword ptr fs:[r14], 1
+	mov qword ptr fs:[r14 + 16], rdx
+.LBB28_23:
+	lea rcx, [rax + 1]
+	mov qword ptr fs:[r14 + 8], rcx
+	mov qword ptr [rsp + 8], 0
+	mov dword ptr [rsp + 24], 0
+	mov dword ptr [rsp + 32], 0
+	mov word ptr [rsp + 40], 0
+	mov word ptr [rsp + 44], 0
+	mov word ptr [rsp + 48], 0
+	mov word ptr [rsp + 52], 0
+	mov byte ptr [rsp + 54], 4
+	movups xmm0, xmmword ptr [rip + .L__unnamed_31]
+	movups xmmword ptr [rsp + 56], xmm0
+	movdqu xmm0, xmmword ptr [rip + .L__unnamed_31+16]
+	movdqu xmmword ptr [rsp + 72], xmm0
+	mov qword ptr [rsp + 88], rax
+	mov qword ptr [rsp + 96], rdx
+	pxor xmm0, xmm0
+	movdqu xmmword ptr [rsp + 104], xmm0
+	mov qword ptr [rsp + 296], r15
+	mov qword ptr [rsp + 304], 0
+	mov qword ptr [rsp + 312], r13
+	lea rdi, [rsp + 320]
+	lea rsi, [rsp + 296]
+	lea rdx, [rsp + 8]
+	call wave_rush::ChunkParser<R>::parse_chunks
+	mov r15, qword ptr [rsp + 320]
+	cmp r15, 3
+	jne .LBB28_25
+	lea rcx, [rsp + 40]
+	movups xmm0, xmmword ptr [rsp + 176]
+	movups xmm1, xmmword ptr [rsp + 192]
+	movups xmm2, xmmword ptr [rsp + 208]
+	movaps xmmword ptr [rsp + 512], xmm0
+	movaps xmmword ptr [rsp + 528], xmm1
+	movaps xmmword ptr [rsp + 544], xmm2
+	mov rax, qword ptr [rsp + 8]
+	mov r15, qword ptr [rsp + 16]
+	mov r14, qword ptr [rsp + 24]
+	mov r12, qword ptr [rsp + 32]
+	movdqu xmm0, xmmword ptr [rcx]
+	movups xmm1, xmmword ptr [rcx + 16]
+	movups xmm2, xmmword ptr [rcx + 32]
+	movups xmm3, xmmword ptr [rcx + 48]
+	movdqa xmmword ptr [rsp + 224], xmm0
+	movaps xmmword ptr [rsp + 240], xmm1
+	movaps xmmword ptr [rsp + 256], xmm2
+	movaps xmmword ptr [rsp + 272], xmm3
+	cmp rax, 2
+	je .LBB28_29
+	movdqu xmm0, xmmword ptr [rsp + 104]
+	movaps xmm1, xmmword ptr [rsp + 224]
+	movaps xmm2, xmmword ptr [rsp + 240]
+	movaps xmm3, xmmword ptr [rsp + 256]
+	movaps xmm4, xmmword ptr [rsp + 272]
+	movups xmmword ptr [rsp + 424], xmm4
+	movups xmmword ptr [rsp + 408], xmm3
+	movups xmmword ptr [rsp + 392], xmm2
+	movups xmmword ptr [rsp + 376], xmm1
+	movaps xmm1, xmmword ptr [rsp + 512]
+	movaps xmm2, xmmword ptr [rsp + 528]
+	movaps xmm3, xmmword ptr [rsp + 544]
+	movups xmmword ptr [rsp + 456], xmm1
+	movups xmmword ptr [rsp + 472], xmm2
+	movups xmmword ptr [rsp + 488], xmm3
+	mov qword ptr [rsp + 344], rax
+	mov qword ptr [rsp + 352], r15
+	mov qword ptr [rsp + 360], r14
+	mov qword ptr [rsp + 368], r12
+	movdqu xmmword ptr [rsp + 440], xmm0
+	movq qword ptr [rsp + 504], xmm0
+	lea r14, [rip + .L__unnamed_32]
+	xor r15d, r15d
+	cmp byte ptr [rsp + 384], 1
+	jne .LBB28_36
+	cmp word ptr [rsp + 386], 1
+	jne .LBB28_36
+	movq rdx, xmm0
+	lea rdi, [rsp + 496]
+	xor esi, esi
+	call qword ptr [rip + <std::fs::File as std::io::Seek>::seek@GOTPCREL]
+	test rax, rax
+	je .LBB28_39
+	mov r14, rdx
+	mov r15d, 1
+.LBB28_36:
+	mov rsi, qword ptr [rsp + 464]
+	test rsi, rsi
+	je .LBB28_38
+	mov rdi, qword ptr [rsp + 456]
+	mov edx, 1
+	call qword ptr [rip + __rust_dealloc@GOTPCREL]
+.LBB28_38:
+	mov edi, dword ptr [rsp + 496]
+	call qword ptr [rip + close@GOTPCREL]
+	lea rdi, [rsp + 344]
+	call core::ptr::drop_in_place<wave_rush::WavReaderOptions>
+	mov r12d, 48
+	jmp .LBB28_29
+.LBB28_25:
+	mov r14, qword ptr [rsp + 328]
+	mov r12, qword ptr [rsp + 336]
+	lea rdi, [rsp + 8]
+	call core::ptr::drop_in_place<wave_rush::WavReaderOptions>
+	jmp .LBB28_26
+.LBB28_39:
+	pxor xmm0, xmm0
+	movdqu xmmword ptr [rsp + 472], xmm0
+	mov r13, qword ptr [rsp + 344]
+	mov r15, qword ptr [rsp + 352]
+	mov r14, qword ptr [rsp + 360]
+	mov r12, qword ptr [rsp + 368]
+	cmp r13, 2
+	je .LBB28_29
+	lea rsi, [rsp + 376]
+	lea rdi, [rsp + 40]
+	mov edx, 136
+	call qword ptr [rip + memcpy@GOTPCREL]
+	mov qword ptr [rsp + 8], r13
+	mov qword ptr [rsp + 16], r15
+	mov qword ptr [rsp + 24], r14
+	mov qword ptr [rsp + 32], r12
+	movzx r13d, byte ptr [rsp + 54]
+	cmp r13, 4
+	je .LBB28_41
+	movzx eax, word ptr [rsp + 52]
+	inc r13
+	mov r14, rax
+	imul r14, r13
+	shl r14, 13
+	test rax, rax
+	mov qword ptr [rsp], rax
+	je .LBB28_43
+	mov esi, 32
+	mov edx, 1
+	mov rdi, r14
+	call qword ptr [rip + aligned_vec::raw::with_capacity_unchecked@GOTPCREL]
+	mov r15, rax
+	mov rdi, rax
+	xor esi, esi
+	mov rdx, r14
+	call qword ptr [rip + memset@GOTPCREL]
+	jmp .LBB28_46
+.LBB28_43:
+	mov r15d, 32
+.LBB28_46:
+	mov r12, qword ptr [rip + __rust_dealloc@GOTPCREL]
+.LBB28_47:
+	mov rbp, qword ptr [rsp + 112]
+	sub rbp, qword ptr [rsp + 168]
+	jbe .LBB28_48
+	cmp rbp, r14
+	cmovae rbp, r14
+	lea rdi, [rsp + 120]
+	mov rsi, r15
+	mov rdx, rbp
+	call <std::io::buffered::bufreader::BufReader<R> as std::io::Read>::read_exact
+	test rax, rax
+	jne .LBB28_61
+	add qword ptr [rsp + 168], rbp
+	mov rax, rbp
+	shr rax, 32
+	je .LBB28_55
+	mov rax, rbp
+	xor edx, edx
+	div r13
+	jmp .LBB28_57
+.LBB28_48:
+	pxor xmm0, xmm0
+	movdqa xmmword ptr [rsp + 224], xmm0
+	jmp .LBB28_49
+.LBB28_55:
+	mov eax, ebp
+	xor edx, edx
+	div r13d
+.LBB28_57:
+	lea rdi, [rsp + 232]
+	mov rsi, r15
+	mov rdx, rbp
+	mov rcx, rax
+	call qword ptr [rip + wave_rush::decode_int16_avx2@GOTPCREL]
+.LBB28_49:
+	mov rdi, qword ptr [rsp + 232]
+	test rdi, rdi
+	je .LBB28_62
+	mov rsi, qword ptr [rsp + 240]
+	shl rsi, 2
+	test rsi, rsi
+	je .LBB28_47
+	mov rdx, qword ptr [rsp + 248]
+	call r12
+	jmp .LBB28_47
+.LBB28_62:
+	mov qword ptr [rbx], 3
+	jmp .LBB28_63
+.LBB28_61:
+	mov rcx, qword ptr [rsp + 248]
+	mov qword ptr [rbx], 1
+	mov qword ptr [rbx + 8], rax
+	mov qword ptr [rbx + 16], rcx
+.LBB28_63:
+	cmp word ptr [rsp], 0
+	je .LBB28_65
+	mov edx, 32
+	mov rdi, r15
+	mov rsi, r14
+	call qword ptr [rip + __rust_dealloc@GOTPCREL]
+.LBB28_65:
+	mov rsi, qword ptr [rsp + 128]
+	test rsi, rsi
+	je .LBB28_67
+	mov rdi, qword ptr [rsp + 120]
+	mov edx, 1
+	call qword ptr [rip + __rust_dealloc@GOTPCREL]
+.LBB28_67:
+	mov edi, dword ptr [rsp + 160]
+	call qword ptr [rip + close@GOTPCREL]
+	lea rdi, [rsp + 8]
+	call core::ptr::drop_in_place<wave_rush::WavReaderOptions>
+	jmp .LBB28_68
+.LBB28_2:
+	lea rdx, [rip + .L__unnamed_33]
+	mov edi, 1
+	mov esi, 131072
+	call qword ptr [rip + alloc::raw_vec::handle_error@GOTPCREL]
+	jmp .LBB28_3
+.LBB28_41:
+	lea rdi, [rip + .L__unnamed_34]
+	call qword ptr [rip + core::option::unwrap_failed@GOTPCREL]
+.LBB28_3:
+	ud2
+	mov rbx, rax
+	lea rdi, [rsp + 8]
+	call core::ptr::drop_in_place<wave_rush::WavDecoder<std::fs::File>>
+	mov rdi, rbx
+	call _Unwind_Resume@PLT
+	mov rbx, rax
+	lea rdi, [rsp + 344]
+	call core::ptr::drop_in_place<wave_rush::WavReader<std::fs::File>>
+	mov rdi, rbx
+	call _Unwind_Resume@PLT
+	mov rbx, rax
+	cmp word ptr [rsp], 0
+	je .LBB28_60
+	mov edx, 32
+	mov rdi, r15
+	mov rsi, r14
+	call qword ptr [rip + __rust_dealloc@GOTPCREL]
+.LBB28_60:
+	lea rdi, [rsp + 8]
+	call core::ptr::drop_in_place<wave_rush::WavDecoder<std::fs::File>>
+	mov rdi, rbx
+	call _Unwind_Resume@PLT
+	mov rbx, rax
+	lea rdi, [rsp + 8]
+	call core::ptr::drop_in_place<wave_rush::WavReaderOptions>
+	lea rdi, [rsp + 176]
+	call core::ptr::drop_in_place<std::io::buffered::bufreader::BufReader<std::fs::File>>
+	mov rdi, rbx
+	call _Unwind_Resume@PLT
+	mov rbx, rax
+	mov edi, ebp
+	call qword ptr [rip + close@GOTPCREL]
+	mov rdi, rbx
+	call _Unwind_Resume@PLT
+	mov rbx, rax
+	lea rdi, [rsp + 176]
+	call core::ptr::drop_in_place<std::io::buffered::bufreader::BufReader<std::fs::File>>
+	mov rdi, rbx
+	call _Unwind_Resume@PLT
