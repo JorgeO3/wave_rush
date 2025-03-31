@@ -4,9 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-aligned-vec = "0.6.1"
-fallible-iterator = "0.3.0"
-thiserror = "2.0.11"
+aligned-vec = "0.6.4"
+fallible-streaming-iterator = "0.1.9"
+thiserror = "2.0.12"
+wide = "0.7.32"
 
 [dev-dependencies]
 rand = "0.9.0"
@@ -14,4 +15,4 @@ rand = "0.9.0"
 [profile.release]
 codegen-units = 1
 opt-level = 3
-debug = true
+lto = 'fat'
